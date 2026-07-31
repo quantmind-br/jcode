@@ -340,6 +340,59 @@ struct MidStreamModelSwitchProvider {
     switch_to: String,
 }
 
+/// Records the exact model-switch request string passed through set_model so
+/// session restore regressions can assert the restored request, not just
+/// session metadata fields.
+struct RecordingSetModelProvider {
+    model: std::sync::Mutex<String>,
+    last_set_model: std::sync::Mutex<Option<String>>,
+}
+
+#[async_trait]
+impl Provider for RecordingSetModelProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (_tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(1);
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        let model = model.trim().to_string();
+        if model.is_empty() {
+            anyhow::bail!("Model cannot be empty");
+        }
+        // Accept both "openrouter:custom-model" and bare forms by stripping a
+        // single known prefix for storage, matching MultiProvider wire shape.
+        let stored = model
+            .strip_prefix("openrouter:")
+            .unwrap_or(model.as_str())
+            .to_string();
+        *self.last_set_model.lock().unwrap() = Some(model.clone());
+        *self.model.lock().unwrap() = stored;
+        Ok(())
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            model: std::sync::Mutex::new(self.model.lock().unwrap().clone()),
+            last_set_model: std::sync::Mutex::new(self.last_set_model.lock().unwrap().clone()),
+        })
+    }
+}
+
 #[async_trait]
 impl Provider for MidStreamModelSwitchProvider {
     async fn complete(
@@ -831,6 +884,121 @@ async fn clear_resets_runtime_interrupt_and_queue_state() {
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
     assert!(agent.locked_tools.is_none());
+}
+
+#[tokio::test]
+async fn restore_session_format_one_openrouter_custom_model_request() {
+    // End-to-end restore: persisted format-1 openrouter/custom-model must set
+    // the provider with openrouter:custom-model, not the legacy double-wrap
+    // openrouter:openrouter/custom-model.
+    let _guard = crate::storage::lock_test_env();
+    let provider = Arc::new(RecordingSetModelProvider {
+        model: std::sync::Mutex::new("anthropic/claude-sonnet-4".to_string()),
+        last_set_model: std::sync::Mutex::new(None),
+    });
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let registry = Registry::new(provider_dyn.clone()).await;
+    let mut agent = Agent::new(provider_dyn, registry);
+
+    let mut restored_session = crate::session::Session::create_with_id(
+        "session_restore_format_one_openrouter_custom".to_string(),
+        None,
+        None,
+    );
+    restored_session.model = Some("openrouter/custom-model".to_string());
+    restored_session.provider_key = Some("openrouter".to_string());
+    restored_session.route_api_method = Some("openrouter".to_string());
+    restored_session.model_identity_format = Some(1);
+    restored_session
+        .save()
+        .expect("save format-1 openrouter session");
+
+    agent
+        .restore_session(&restored_session.id)
+        .expect("restore session should succeed");
+
+    let request = provider
+        .last_set_model
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("restore must call set_model");
+    assert_eq!(request, "openrouter:custom-model");
+    assert_eq!(agent.provider_model(), "custom-model");
+    assert_eq!(
+        agent.session.model.as_deref(),
+        Some("openrouter/custom-model")
+    );
+    assert_eq!(agent.session.model_identity_format, Some(1));
+}
+
+#[tokio::test]
+async fn restore_session_legacy_openrouter_without_marker_keeps_double_wrap_request() {
+    let _guard = crate::storage::lock_test_env();
+    let provider = Arc::new(RecordingSetModelProvider {
+        model: std::sync::Mutex::new("anthropic/claude-sonnet-4".to_string()),
+        last_set_model: std::sync::Mutex::new(None),
+    });
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let registry = Registry::new(provider_dyn.clone()).await;
+    let mut agent = Agent::new(provider_dyn, registry);
+
+    let mut restored_session = crate::session::Session::create_with_id(
+        "session_restore_legacy_openrouter_no_marker".to_string(),
+        None,
+        None,
+    );
+    restored_session.model = Some("openrouter/custom-model".to_string());
+    restored_session.provider_key = Some("openrouter".to_string());
+    restored_session.route_api_method = Some("openrouter".to_string());
+    restored_session.model_identity_format = None;
+    restored_session
+        .save()
+        .expect("save legacy openrouter session");
+
+    agent
+        .restore_session(&restored_session.id)
+        .expect("restore session should succeed");
+
+    let request = provider
+        .last_set_model
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("restore must call set_model");
+    assert_eq!(request, "openrouter:openrouter/custom-model");
+}
+
+#[tokio::test]
+async fn new_with_session_format_one_openrouter_custom_model_request() {
+    let _guard = crate::storage::lock_test_env();
+    let provider = Arc::new(RecordingSetModelProvider {
+        model: std::sync::Mutex::new("anthropic/claude-sonnet-4".to_string()),
+        last_set_model: std::sync::Mutex::new(None),
+    });
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let registry = Registry::new(provider_dyn.clone()).await;
+
+    let mut session = crate::session::Session::create_with_id(
+        "session_attach_format_one_openrouter_custom".to_string(),
+        None,
+        None,
+    );
+    session.model = Some("openrouter/custom-model".to_string());
+    session.provider_key = Some("openrouter".to_string());
+    session.route_api_method = Some("openrouter".to_string());
+    session.model_identity_format = Some(1);
+    session.save().expect("save attach session");
+
+    let _agent = Agent::new_with_session(provider_dyn, registry, session, None);
+
+    let request = provider
+        .last_set_model
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("attach must call set_model");
+    assert_eq!(request, "openrouter:custom-model");
 }
 
 #[tokio::test]

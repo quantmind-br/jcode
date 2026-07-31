@@ -596,10 +596,11 @@ impl Agent {
         let model_start = Instant::now();
         if let Some(model) = self.session.model.clone() {
             let model_request =
-                crate::provider::MultiProvider::model_switch_request_for_session_route(
+                crate::provider::MultiProvider::model_switch_request_for_session_route_with_identity_format(
                     &model,
                     self.session.provider_key.as_deref(),
                     self.session.route_api_method.as_deref(),
+                    self.session.model_identity_format,
                 );
             if let Err(e) =
                 crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), &model_request)

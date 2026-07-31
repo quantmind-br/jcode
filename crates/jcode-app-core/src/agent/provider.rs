@@ -200,6 +200,13 @@ impl Agent {
         self.session.route_api_method.clone()
     }
 
+    /// Persisted model identity format marker (format 1 = canonical
+    /// provider/model). Spawned agents inherit this so restore of one-segment
+    /// OpenRouter ids does not fall back to legacy double-wrap parsing.
+    pub fn session_model_identity_format(&self) -> Option<u8> {
+        self.session.model_identity_format
+    }
+
     /// The credential the active provider will use for the next request, when
     /// the provider distinguishes OAuth (subscription) from API key (cost).
     /// Resolved authoritatively here so remote clients can render billing/usage

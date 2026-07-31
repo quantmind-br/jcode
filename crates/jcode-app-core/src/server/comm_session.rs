@@ -220,6 +220,7 @@ pub(super) struct CoordinatorSpawnIdentity {
     pub model: Option<String>,
     pub provider_key: Option<String>,
     pub route_api_method: Option<String>,
+    pub model_identity_format: Option<u8>,
     pub is_canary: bool,
 }
 
@@ -231,6 +232,7 @@ pub(super) struct SwarmSpawnSelection {
     pub model: Option<String>,
     pub provider_key: Option<String>,
     pub route_api_method: Option<String>,
+    pub model_identity_format: Option<u8>,
 }
 
 /// Resolve the coordinator's model/auth identity without blocking on its agent
@@ -252,6 +254,7 @@ async fn resolve_coordinator_spawn_identity(
             model: Some(agent_guard.provider_model()),
             provider_key: agent_guard.session_provider_key(),
             route_api_method: agent_guard.session_route_api_method(),
+            model_identity_format: agent_guard.session_model_identity_format(),
             is_canary: agent_guard.is_canary(),
         };
     }
@@ -264,6 +267,7 @@ async fn resolve_coordinator_spawn_identity(
                 model: session.model.clone(),
                 provider_key: session.provider_key.clone(),
                 route_api_method: session.route_api_method.clone(),
+                model_identity_format: session.model_identity_format,
                 is_canary: session.is_canary,
             };
             crate::logging::info(&format!(
@@ -316,6 +320,8 @@ fn explicit_route_for_configured_model(model: &str) -> Option<SwarmSpawnSelectio
         model: Some(bare.to_string()),
         provider_key: Some(route_id.to_string()),
         route_api_method: Some(route_id.to_string()),
+        // Explicit route-prefixed config models are format-1 identities.
+        model_identity_format: Some(1),
     })
 }
 
@@ -334,6 +340,7 @@ fn inherit_coordinator_selection(coordinator: &CoordinatorSpawnIdentity) -> Swar
             .clone()
             .or_else(|| provider_key_for_spawn_model(coordinator.model.as_deref(), None)),
         route_api_method: coordinator.route_api_method.clone(),
+        model_identity_format: coordinator.model_identity_format,
     }
 }
 
@@ -362,12 +369,15 @@ fn selection_for_concrete_model(
                 .clone()
                 .or_else(|| provider_key_for_spawn_model(Some(&model), None)),
             route_api_method: coordinator.route_api_method.clone(),
+            model_identity_format: coordinator.model_identity_format,
         }
     } else {
         SwarmSpawnSelection {
             provider_key: provider_key_for_spawn_model(Some(&model), None),
             model: Some(model),
             route_api_method: None,
+            // Concrete non-inherited models are written as format-1 identities.
+            model_identity_format: Some(1),
         }
     }
 }
@@ -606,6 +616,7 @@ pub(super) async fn spawn_swarm_agent(
     let spawn_model = selection.model.clone();
     let spawn_provider_key = selection.provider_key.clone();
     let spawn_route_api_method = selection.route_api_method.clone();
+    let spawn_model_identity_format = selection.model_identity_format;
     let spawn_effort = requested_effort
         .as_deref()
         .map(str::trim)
@@ -682,6 +693,7 @@ pub(super) async fn spawn_swarm_agent(
                 spawn_model.clone(),
                 spawn_provider_key.clone(),
                 spawn_route_api_method.clone(),
+                spawn_model_identity_format,
                 spawn_effort.clone(),
                 Some(Arc::clone(mcp_pool)),
                 Some(req_session_id.to_string()),

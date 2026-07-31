@@ -32,6 +32,7 @@ pub(super) async fn create_headless_session(
     model_override: Option<String>,
     provider_key_override: Option<String>,
     route_api_method_override: Option<String>,
+    model_identity_format_override: Option<u8>,
     effort_override: Option<String>,
     mcp_pool: Option<Arc<crate::mcp::SharedMcpPool>>,
     report_back_to_session_id: Option<String>,
@@ -96,10 +97,11 @@ pub(super) async fn create_headless_session(
         // route (e.g. claude-api vs claude-oauth, or an openai-compatible
         // profile) so the spawned headless agent reconstructs the exact
         // provider/auth the coordinator was using instead of a config default.
-        let model_request = crate::provider::MultiProvider::model_switch_request_for_session_route(
+        let model_request = crate::provider::MultiProvider::model_switch_request_for_session_route_with_identity_format(
             &model,
             provider_key_override.as_deref(),
             route_api_method_override.as_deref(),
+            model_identity_format_override,
         );
         // A worker that silently runs a model other than the requested one burns
         // the wrong quota and produces results the caller attributes to the wrong

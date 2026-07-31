@@ -814,3 +814,25 @@ fn fill_missing_fresh_openrouter_model_stays_format_one_without_double_wrap() {
         Some("openrouter/openrouter/custom-model")
     );
 }
+
+#[test]
+fn tui_restore_request_honors_format_one_openrouter_identity() {
+    // Mirrors tui_lifecycle_runtime restore_session model_request construction.
+    let request =
+        crate::provider::MultiProvider::model_switch_request_for_session_route_with_identity_format(
+            "openrouter/custom-model",
+            Some("openrouter"),
+            Some("openrouter"),
+            Some(1),
+        );
+    assert_eq!(request, "openrouter:custom-model");
+
+    let legacy =
+        crate::provider::MultiProvider::model_switch_request_for_session_route_with_identity_format(
+            "openrouter/custom-model",
+            Some("openrouter"),
+            Some("openrouter"),
+            None,
+        );
+    assert_eq!(legacy, "openrouter:openrouter/custom-model");
+}
