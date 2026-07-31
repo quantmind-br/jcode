@@ -254,6 +254,7 @@ fn prepare_visible_spawn_session_persists_startup_before_launch() {
         None,
         None,
         None,
+        None,
         false,
         Some(startup),
         |session_id, _cwd: &std::path::Path, _selfdev, provider_key| {
@@ -301,6 +302,7 @@ fn prepare_visible_spawn_session_cleans_startup_when_launch_not_started() {
         None,
         None,
         None,
+        None,
         false,
         Some("Do the thing."),
         |_session_id, _cwd: &std::path::Path, _selfdev, _provider_key| Ok(false),
@@ -333,6 +335,7 @@ fn prepare_visible_spawn_session_cleans_session_when_launch_errors() {
 
     let error = prepare_visible_spawn_session(
         Some(worktree.path().to_str().expect("utf8 worktree path")),
+        None,
         None,
         None,
         None,
@@ -372,6 +375,7 @@ fn prepare_visible_spawn_session_persists_and_launches_provider_key_for_openrout
         Some("openai/gpt-5.4@OpenAI"),
         None,
         None,
+        Some(1),
         None,
         false,
         None,
@@ -405,6 +409,7 @@ fn prepare_visible_spawn_session_persists_requested_effort() {
         Some("gpt-5.5"),
         None,
         None,
+        Some(1),
         Some("low"),
         false,
         None,
@@ -436,6 +441,7 @@ fn prepare_visible_spawn_session_prefers_parent_provider_key_over_model_guess() 
         Some("gpt-5.4"),
         Some("ollama"),
         None,
+        Some(1),
         None,
         false,
         None,
@@ -1138,4 +1144,89 @@ async fn spawn_admission_lock_serializes_per_swarm_only() {
             .await
             .is_ok()
     );
+}
+
+#[test]
+fn prepare_visible_spawn_session_preserves_format_one_openrouter_identity() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let worktree = tempfile::TempDir::new().expect("temp worktree");
+    let (session_id, launched) = prepare_visible_spawn_session(
+        Some(worktree.path().to_str().expect("utf8 worktree path")),
+        Some("openrouter/custom-model"),
+        Some("openrouter"),
+        Some("openrouter"),
+        Some(1),
+        None,
+        false,
+        None,
+        |_session_id, _cwd: &std::path::Path, _selfdev, provider_key| {
+            assert_eq!(provider_key, Some("openrouter"));
+            Ok(true)
+        },
+    )
+    .expect("visible spawn preparation should succeed");
+
+    assert!(launched);
+    let session = crate::session::Session::load(&session_id).expect("load spawned session");
+    assert_eq!(session.model.as_deref(), Some("openrouter/custom-model"));
+    assert_eq!(session.provider_key.as_deref(), Some("openrouter"));
+    assert_eq!(session.model_identity_format, Some(1));
+    assert_ne!(
+        session.model.as_deref(),
+        Some("openrouter/openrouter/custom-model")
+    );
+    let request =
+        crate::provider::MultiProvider::model_switch_request_for_session_route_with_identity_format(
+            session.model.as_deref().expect("model"),
+            session.provider_key.as_deref(),
+            session.route_api_method.as_deref(),
+            session.model_identity_format,
+        );
+    assert_eq!(request, "openrouter:custom-model");
+}
+
+#[test]
+fn prepare_visible_spawn_session_preserves_legacy_openrouter_identity_without_marker() {
+    // Complementary to the format-1 case: marker None must keep historical
+    // OpenRouter double-wrap semantics through the visible-spawn path.
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let worktree = tempfile::TempDir::new().expect("temp worktree");
+    let (session_id, launched) = prepare_visible_spawn_session(
+        Some(worktree.path().to_str().expect("utf8 worktree path")),
+        Some("openrouter/custom-model"),
+        Some("openrouter"),
+        Some("openrouter"),
+        None,
+        None,
+        false,
+        None,
+        |_session_id, _cwd: &std::path::Path, _selfdev, provider_key| {
+            assert_eq!(provider_key, Some("openrouter"));
+            Ok(true)
+        },
+    )
+    .expect("visible spawn preparation should succeed");
+
+    assert!(launched);
+    let session = crate::session::Session::load(&session_id).expect("load spawned session");
+    assert_eq!(
+        session.model.as_deref(),
+        Some("openrouter/openrouter/custom-model")
+    );
+    assert_eq!(session.provider_key.as_deref(), Some("openrouter"));
+    assert_eq!(session.model_identity_format, None);
+    let request =
+        crate::provider::MultiProvider::model_switch_request_for_session_route_with_identity_format(
+            session.model.as_deref().expect("model"),
+            session.provider_key.as_deref(),
+            session.route_api_method.as_deref(),
+            session.model_identity_format,
+        );
+    assert_eq!(request, "openrouter:openrouter/custom-model");
 }

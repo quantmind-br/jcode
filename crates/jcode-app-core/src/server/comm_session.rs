@@ -69,6 +69,7 @@ fn create_visible_spawn_session(
     model_override: Option<&str>,
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
+    model_identity_format_override: Option<u8>,
     effort_override: Option<&str>,
     selfdev_requested: bool,
 ) -> anyhow::Result<(String, PathBuf)> {
@@ -82,12 +83,18 @@ fn create_visible_spawn_session(
         .map(str::to_string)
         .or_else(|| provider_key_for_spawn_model(model_override, None));
     let provider_key_ref = provider_key.as_deref();
+    // Honor the spawn selection's identity marker. Format-1 OpenRouter ids such
+    // as openrouter/custom-model must not be re-canonicalized under format-none
+    // (that would double-wrap them) and then forced to format 1.
     if let Some(model) = model_override {
-        session.model = Some(crate::provider::MultiProvider::canonical_session_model(
-            model,
-            provider_key_ref,
-            route_api_method_override,
-        ));
+        session.model = Some(
+            crate::provider::MultiProvider::canonical_session_model_with_identity_format(
+                model,
+                provider_key_ref,
+                route_api_method_override,
+                model_identity_format_override,
+            ),
+        );
     }
     if let Some(provider_key) = provider_key {
         session.provider_key = Some(provider_key);
@@ -98,7 +105,7 @@ fn create_visible_spawn_session(
     {
         session.route_api_method = Some(route_api_method.to_string());
     }
-    session.model_identity_format = Some(1);
+    session.model_identity_format = model_identity_format_override;
     if let Some(effort) = effort_override.map(str::trim).filter(|e| !e.is_empty()) {
         // Persisted effort is restored (and validated against the resolved
         // provider/model) by `restore_reasoning_effort_from_session` when the
@@ -450,6 +457,7 @@ fn prepare_visible_spawn_session<F>(
     model_override: Option<&str>,
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
+    model_identity_format_override: Option<u8>,
     effort_override: Option<&str>,
     selfdev_requested: bool,
     startup_message: Option<&str>,
@@ -464,6 +472,7 @@ where
         model_override,
         provider_key.as_deref(),
         route_api_method_override,
+        model_identity_format_override,
         effort_override,
         selfdev_requested,
     )?;
@@ -650,6 +659,7 @@ pub(super) async fn spawn_swarm_agent(
             spawn_model.as_deref(),
             spawn_provider_key.as_deref(),
             spawn_route_api_method.as_deref(),
+            spawn_model_identity_format,
             spawn_effort.as_deref(),
             coordinator_is_canary,
             startup_message.as_deref(),
