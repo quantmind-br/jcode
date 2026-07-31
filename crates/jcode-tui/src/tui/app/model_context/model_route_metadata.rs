@@ -154,20 +154,23 @@ pub(crate) fn fill_missing_session_route_metadata_from_provider(
         session.route_api_method = meta.route_api_method;
     }
     if session.model_identity_format.is_none() {
-        // We are about to mark this session as format 1. If a model string was
-        // already present under the historical (format-none) interpretation,
-        // re-canonicalize it under that old marker first so promotion cannot
-        // silently change OpenRouter restore semantics.
-        if let Some(existing_model) = session.model.clone() {
-            let promoted =
-                crate::provider::MultiProvider::canonical_session_model_with_identity_format(
-                    &existing_model,
-                    session.provider_key.as_deref(),
-                    session.route_api_method.as_deref(),
-                    None,
-                );
-            if !promoted.is_empty() {
-                session.model = Some(promoted);
+        // We are about to mark this session as format 1. Only re-canonicalize a
+        // model that was already present under the historical (format-none)
+        // interpretation. Fresh models just filled from `meta` are already
+        // format-1 identities and must not be re-run under format-none (that
+        // would turn openrouter/custom-model into openrouter/openrouter/...).
+        if had_model {
+            if let Some(existing_model) = session.model.clone() {
+                let promoted =
+                    crate::provider::MultiProvider::canonical_session_model_with_identity_format(
+                        &existing_model,
+                        session.provider_key.as_deref(),
+                        session.route_api_method.as_deref(),
+                        None,
+                    );
+                if !promoted.is_empty() {
+                    session.model = Some(promoted);
+                }
             }
         }
         session.model_identity_format = Some(meta.model_identity_format);

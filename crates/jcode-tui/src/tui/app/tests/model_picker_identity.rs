@@ -784,3 +784,33 @@ fn fill_missing_promotes_format_only_after_recanonicalizing_existing_model() {
         Some("openrouter/openrouter/custom-model")
     );
 }
+
+#[test]
+fn fill_missing_fresh_openrouter_model_stays_format_one_without_double_wrap() {
+    // Missing model gets filled from the live provider as a format-1 identity.
+    // Re-running that fresh value under format-none would double-wrap
+    // one-segment OpenRouter ids.
+    let _env_lock = crate::storage::lock_test_env();
+    let mut session = crate::session::Session::create(None, None);
+    session.model = None;
+    session.provider_key = Some("openrouter".to_string());
+    session.route_api_method = Some("openrouter".to_string());
+    session.model_identity_format = None;
+
+    let provider: Arc<dyn Provider> = Arc::new(NamedProvider {
+        provider_name: "openrouter",
+        provider_model: "custom-model",
+    });
+    crate::tui::app::model_context::model_route_metadata::fill_missing_session_route_metadata_from_provider(
+        &mut session,
+        provider.as_ref(),
+    );
+
+    assert_eq!(session.model.as_deref(), Some("openrouter/custom-model"));
+    assert_eq!(session.provider_key.as_deref(), Some("openrouter"));
+    assert_eq!(session.model_identity_format, Some(1));
+    assert_ne!(
+        session.model.as_deref(),
+        Some("openrouter/openrouter/custom-model")
+    );
+}
