@@ -10,7 +10,7 @@
     "crates/jcode-app-core/src/tool/selfdev/tests.rs": 1440,
     "crates/jcode-base/src/config_tests.rs": 1407,
     "crates/jcode-base/src/live_tests.rs": 3087,
-    "crates/jcode-base/src/provider/tests/model_resolution.rs": 2727,
+    "crates/jcode-base/src/provider/tests/model_resolution.rs": 2809,
     "crates/jcode-base/src/session_tests/cases.rs": 2510,
     "crates/jcode-desktop2/src/tests/actions.rs": 1296,
     "crates/jcode-plan/src/dag/tests.rs": 1392,
