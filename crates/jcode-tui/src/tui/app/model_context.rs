@@ -2035,9 +2035,9 @@ pub(super) fn resolve_typed_model_command(
         return TypedModelCommandResolution::PassThrough;
     }
 
-    fn choose_representative_route<'a>(
-        group: &'a [crate::provider::ModelRoute],
-    ) -> Option<&'a crate::provider::ModelRoute> {
+    fn choose_representative_route(
+        group: &[crate::provider::ModelRoute],
+    ) -> Option<&crate::provider::ModelRoute> {
         group.iter().find(|r| r.available).or_else(|| group.first())
     }
 

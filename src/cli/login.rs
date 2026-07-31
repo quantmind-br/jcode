@@ -412,15 +412,13 @@ fn maybe_persist_default_provider_after_login(
         if let (Some(model), Some(provider_id)) = (
             cfg.provider.default_model.as_deref(),
             cfg.provider.default_provider.as_deref(),
-        ) {
-            if let Err(err) =
-                crate::config::Config::set_default_model(Some(model), Some(provider_id))
-            {
-                crate::logging::warn(&format!(
-                    "Failed to normalize the configured default model after login: {}",
-                    err
-                ));
-            }
+        ) && let Err(err) =
+            crate::config::Config::set_default_model(Some(model), Some(provider_id))
+        {
+            crate::logging::warn(&format!(
+                "Failed to normalize the configured default model after login: {}",
+                err
+            ));
         }
         return;
     }

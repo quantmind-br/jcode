@@ -554,20 +554,20 @@ pub fn source_identity_for_route_metadata(
 
     // A bare compatible route still needs the provider key to distinguish a
     // configured profile from the public OpenRouter slot.
-    if route_api_method == Some("openai-compatible") {
-        if let Some(provider_key) = provider_key {
-            if let Some(profile_id) = provider_key.strip_prefix("openai-compatible:") {
-                if let Some(source_key) = named_profile_source_key_for_route_component(profile_id) {
-                    return Some(route_source_identity_from_key(source_key));
-                }
-                return Some(route_source_identity_from_key(format!(
-                    "openai-compatible:{}",
-                    profile_id.trim()
-                )));
-            }
-            if let Some(source_key) = named_profile_source_key_for_route_component(provider_key) {
+    if route_api_method == Some("openai-compatible")
+        && let Some(provider_key) = provider_key
+    {
+        if let Some(profile_id) = provider_key.strip_prefix("openai-compatible:") {
+            if let Some(source_key) = named_profile_source_key_for_route_component(profile_id) {
                 return Some(route_source_identity_from_key(source_key));
             }
+            return Some(route_source_identity_from_key(format!(
+                "openai-compatible:{}",
+                profile_id.trim()
+            )));
+        }
+        if let Some(source_key) = named_profile_source_key_for_route_component(provider_key) {
+            return Some(route_source_identity_from_key(source_key));
         }
     }
 
@@ -575,18 +575,18 @@ pub fn source_identity_for_route_metadata(
     // bucket even though their requests use the shared OpenRouter-capable
     // transport. A provider-level switch can persist the bare profile id,
     // while picker selections persist `openai-compatible:<id>`.
-    if route_api_method != Some("openrouter") {
-        if let Some(provider_key) = provider_key {
-            let profile_id = provider_key
-                .strip_prefix("openai-compatible:")
-                .map(str::trim)
-                .filter(|profile_id| !profile_id.is_empty())
-                .unwrap_or(provider_key);
-            if crate::provider_catalog::openai_compatible_profile_by_id(profile_id).is_some() {
-                return Some(route_source_identity_from_key(format!(
-                    "openai-compatible:{profile_id}"
-                )));
-            }
+    if route_api_method != Some("openrouter")
+        && let Some(provider_key) = provider_key
+    {
+        let profile_id = provider_key
+            .strip_prefix("openai-compatible:")
+            .map(str::trim)
+            .filter(|profile_id| !profile_id.is_empty())
+            .unwrap_or(provider_key);
+        if crate::provider_catalog::openai_compatible_profile_by_id(profile_id).is_some() {
+            return Some(route_source_identity_from_key(format!(
+                "openai-compatible:{profile_id}"
+            )));
         }
     }
 
@@ -641,16 +641,7 @@ pub fn source_identity_for_route_metadata(
             }
             format!("openai-compatible:{profile_id}")
         }
-        _ => {
-            // An explicit provider key or canonical identity is enough to
-            // preserve an unknown named route.  Do not reinterpret a name
-            // containing "openai" as native OpenAI.
-            if let Some(source_key) = named_profile_source_key_for_route_component(token) {
-                source_key
-            } else {
-                return None;
-            }
-        }
+        _ => named_profile_source_key_for_route_component(token)?,
     };
     Some(route_source_identity_from_key(source_key))
 }
