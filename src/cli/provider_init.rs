@@ -1196,6 +1196,24 @@ fn explicit_credential_mode(choice: &ProviderChoice) -> Option<provider::Credent
     }
 }
 
+/// The provider namespace that an explicit `--provider` choice pins, for the
+/// choices whose runtime is `MultiProvider` and whose namespace token is already
+/// understood by `explicit_model_provider_prefix`. `None` means "leave the model
+/// spec untouched": either the choice is `Auto` (global ambiguity rules apply) or
+/// its runtime is a single provider that cannot collide.
+fn explicit_provider_namespace(choice: &ProviderChoice) -> Option<&'static str> {
+    match choice {
+        ProviderChoice::Claude => Some("claude"),
+        ProviderChoice::AnthropicApi => Some("claude-api"),
+        ProviderChoice::Openai => Some("openai"),
+        ProviderChoice::OpenaiApi => Some("openai-api"),
+        ProviderChoice::Copilot => Some("copilot"),
+        ProviderChoice::Openrouter => Some("openrouter"),
+        ProviderChoice::Bedrock => Some("bedrock"),
+        _ => None,
+    }
+}
+
 fn disable_subscription_runtime_mode() {
     crate::subscription_catalog::clear_runtime_env();
 }
@@ -1277,7 +1295,9 @@ pub async fn login_and_bootstrap_provider(
             let model = crate::provider::activation::apply_azure_openai_runtime()?;
             let multi = provider::MultiProvider::new();
             if let Some(model) = model {
-                let _ = multi.set_model(&model);
+                multi.set_model(&model).map_err(|err| {
+                    anyhow::anyhow!("Failed to select model '{model}': {err}")
+                })?;
             }
             Arc::new(multi)
         }
@@ -1494,7 +1514,9 @@ async fn init_provider_with_options(
             init_notice("Using Azure OpenAI as the initial provider (use /model to switch)");
             let multi = provider::MultiProvider::new_fast();
             if let Some(model) = model {
-                let _ = multi.set_model(&model);
+                multi.set_model(&model).map_err(|err| {
+                    anyhow::anyhow!("Failed to select model '{model}': {err}")
+                })?;
             }
             Arc::new(multi)
         }
@@ -1795,14 +1817,18 @@ async fn init_provider_with_options(
     }
 
     if let Some(model_name) = model {
-        if let Err(e) = provider.set_model(model_name) {
-            init_notice(&format!(
-                "Warning: failed to set model '{}': {}",
-                model_name, e
-            ));
-        } else {
-            init_notice(&format!("Using model: {}", model_name));
-        }
+        let spec = match explicit_provider_namespace(choice) {
+            Some(namespace)
+                if provider::parse_model_spec(model_name).provider.is_none() =>
+            {
+                format!("{namespace}:{model_name}")
+            }
+            _ => model_name.to_string(),
+        };
+        provider.set_model(&spec).map_err(|err| {
+            anyhow::anyhow!("Failed to select model '{model_name}': {err}")
+        })?;
+        init_notice(&format!("Using model: {model_name}"));
     }
 
     Ok(provider)
