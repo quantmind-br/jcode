@@ -1007,7 +1007,7 @@ impl Agent {
                 let metadata =
                     crate::provider::MultiProvider::session_route_metadata_from_model_switch(
                         &model_after_stream,
-                        self.provider.name(),
+                        &provider_name,
                         self.session.provider_key.as_deref(),
                     );
                 self.session.model = Some(metadata.model);

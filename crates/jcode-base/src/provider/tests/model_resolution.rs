@@ -1213,6 +1213,86 @@ fn unique_bare_exact_route_selects_named_profile_and_collision_is_explicit() {
 }
 
 #[test]
+fn qualified_homonymous_named_profiles_report_distinct_display_names() {
+    // Smoke-oracle regression: two custom providers can expose the same model
+    // id, and `provider current` must distinguish them via display_name() even
+    // though MultiProvider::name() stays "OpenRouter" for the shared slot.
+    with_clean_provider_test_env(|| {
+        let jcode_home = std::env::var_os("JCODE_HOME").expect("test JCODE_HOME should be set");
+        std::fs::write(
+            std::path::PathBuf::from(jcode_home).join("config.toml"),
+            r#"
+[providers.prov-a]
+type = "openai-compatible"
+base_url = "https://a.invalid/v1"
+auth = "none"
+default_model = "gpt-5.6-sol"
+
+[[providers.prov-a.models]]
+id = "gpt-5.6-sol"
+input = ["text"]
+
+[providers.prov-b]
+type = "openai-compatible"
+base_url = "https://b.invalid/v1"
+auth = "none"
+default_model = "gpt-5.6-sol"
+
+[[providers.prov-b.models]]
+id = "gpt-5.6-sol"
+input = ["text"]
+"#,
+        )
+        .expect("write dual named provider config");
+        crate::config::invalidate_config_cache();
+
+        let runtime = enter_test_runtime();
+        let _runtime_guard = runtime.enter();
+        let provider = empty_model_resolution_provider(ActiveProvider::Claude);
+
+        provider
+            .set_model("prov-a/gpt-5.6-sol")
+            .expect("qualified prov-a selection");
+        assert_eq!(provider.model(), "gpt-5.6-sol");
+        assert_eq!(provider.display_name(), "prov-a");
+        assert_eq!(provider.name(), "OpenRouter");
+
+        provider
+            .set_model("prov-b/gpt-5.6-sol")
+            .expect("qualified prov-b selection");
+        assert_eq!(provider.model(), "gpt-5.6-sol");
+        assert_eq!(provider.display_name(), "prov-b");
+        assert_eq!(provider.name(), "OpenRouter");
+
+        // Ambient process env must not steal the named profile identity.
+        let _runtime = OrEnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "gemini");
+        let metadata_a = MultiProvider::session_route_metadata_from_model_switch(
+            "gpt-5.6-sol",
+            "prov-a",
+            None,
+        );
+        assert_eq!(metadata_a.provider_key.as_deref(), Some("prov-a"));
+        assert_eq!(metadata_a.model, "prov-a/gpt-5.6-sol");
+        assert_eq!(metadata_a.model_identity_format, 1);
+
+        provider
+            .set_model("prov-a/gpt-5.6-sol")
+            .expect("switch back to prov-a");
+        let metadata_live = MultiProvider::session_route_metadata_from_model_switch(
+            provider.model().as_str(),
+            &provider.display_name(),
+            None,
+        );
+        assert_eq!(
+            metadata_live.provider_key.as_deref(),
+            Some("prov-a"),
+            "{metadata_live:?}"
+        );
+        assert_eq!(metadata_live.model, "prov-a/gpt-5.6-sol");
+    });
+}
+
+#[test]
 fn bare_unique_dual_auth_route_keeps_auto_credential_mode() {
     use jcode_provider_core::{CredentialMode, Provider};
 

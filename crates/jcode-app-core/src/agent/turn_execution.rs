@@ -158,7 +158,7 @@ impl Agent {
         let model = self.provider.model();
         let metadata = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
             &model,
-            self.provider.name(),
+            &self.provider.display_name(),
             None,
         );
         new_session.model = Some(metadata.model);
@@ -613,7 +613,7 @@ impl Agent {
             let model = self.provider.model();
             let metadata = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
                 &model,
-                self.provider.name(),
+                &self.provider.display_name(),
                 self.session.provider_key.as_deref(),
             );
             self.session.model = Some(metadata.model);

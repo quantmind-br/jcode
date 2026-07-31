@@ -229,7 +229,7 @@ pub(super) fn handle_bus_event(
                 .or(app.session.provider_key.as_deref());
             let meta = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
                 &model,
-                app.provider.name(),
+                &app.provider.display_name(),
                 provider_key,
             );
             crate::tui::app::model_context::model_route_metadata::apply_session_route_metadata(

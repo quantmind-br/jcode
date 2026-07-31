@@ -365,7 +365,7 @@ impl Agent {
         agent.session.mark_active();
         let metadata = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
             agent.provider.model().as_str(),
-            agent.provider.name(),
+            &agent.provider.display_name(),
             None,
         );
         agent.session.model = Some(metadata.model);
@@ -431,7 +431,7 @@ impl Agent {
             let model = agent.provider.model();
             let metadata = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
                 &model,
-                agent.provider.name(),
+                &agent.provider.display_name(),
                 agent.session.provider_key.as_deref(),
             );
             agent.session.model = Some(metadata.model);

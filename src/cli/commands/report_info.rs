@@ -394,7 +394,10 @@ pub(super) async fn run_provider_current_command(
     let report = ProviderCurrentReport {
         requested_provider: choice.as_arg_value().to_string(),
         requested_model: model.map(str::to_string),
-        resolved_provider: crate::provider_catalog::runtime_provider_display_name(provider.name()),
+        // Named OpenAI-compatible profiles share the OpenRouter runtime slot
+        // (`name()` is fixed), so prefer `display_name()` which reflects the
+        // active profile selected by a qualified provider/model identity.
+        resolved_provider: provider.display_name(),
         selected_model: provider.model(),
     };
 

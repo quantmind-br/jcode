@@ -551,7 +551,11 @@ impl MultiProvider {
     }
 
     fn session_provider_key_from_provider_name(provider_name: &str) -> Option<String> {
-        let normalized = provider_name.trim().to_ascii_lowercase();
+        let trimmed = provider_name.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let normalized = trimmed.to_ascii_lowercase();
         let key = match normalized.as_str() {
             "jcode" => "jcode",
             "anthropic" | "claude" | "claude cli" => "claude",
@@ -562,8 +566,31 @@ impl MultiProvider {
             "gemini" | "google" => "gemini",
             "antigravity" => "antigravity",
             "bedrock" | "aws bedrock" => "bedrock",
-            "" => return None,
-            _ => return None,
+            _ => {
+                // Configured named providers and known OpenAI-compatible catalog
+                // profiles are explicit identities. Resolve them before any
+                // process-global env fallback (JCODE_RUNTIME_PROVIDER, etc.).
+                if let Some(name) = crate::config::config()
+                    .providers
+                    .keys()
+                    .find(|name| name.eq_ignore_ascii_case(trimmed))
+                {
+                    return Some(name.clone());
+                }
+                if let Some(profile) =
+                    crate::provider_catalog::resolve_openai_compatible_profile_selection(trimmed)
+                {
+                    return Some(profile.id.to_string());
+                }
+                if let Some(profile) = crate::provider_catalog::openai_compatible_profiles()
+                    .iter()
+                    .copied()
+                    .find(|profile| profile.display_name.eq_ignore_ascii_case(trimmed))
+                {
+                    return Some(profile.id.to_string());
+                }
+                return None;
+            }
         };
         Some(key.to_string())
     }
