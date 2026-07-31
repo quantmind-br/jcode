@@ -74,7 +74,8 @@ pub use route_builders::{
     build_anthropic_oauth_route, build_chatgpt_web_route, build_copilot_route,
     build_openai_api_key_route, build_openai_oauth_route, build_openrouter_auto_route,
     build_openrouter_endpoint_route, build_openrouter_fallback_provider_route,
-    is_listable_model_name, listable_model_names_from_routes, openrouter_catalog_model_id,
+    canonical_route_identity, is_listable_model_name, listable_model_names_from_routes,
+    openrouter_catalog_model_id, route_provider_key,
 };
 pub(crate) use routing::{
     anthropic_api_key_route_availability, anthropic_oauth_route_availability,
@@ -961,54 +962,11 @@ impl MultiProvider {
     }
 
     fn route_provider_key(route: &ModelRoute) -> Option<String> {
-        match route.api_method_kind() {
-            ModelRouteApiMethod::JcodeSubscription => Some("jcode".to_string()),
-            ModelRouteApiMethod::ClaudeOAuth | ModelRouteApiMethod::AnthropicApiKey => {
-                Some("claude".to_string())
-            }
-            ModelRouteApiMethod::OpenAIOAuth | ModelRouteApiMethod::OpenAIApiKey => {
-                Some("openai".to_string())
-            }
-            ModelRouteApiMethod::Other(method) if method == "chatgpt-web" => {
-                Some("openai".to_string())
-            }
-            ModelRouteApiMethod::OpenRouter => Some("openrouter".to_string()),
-            ModelRouteApiMethod::OpenAiCompatible {
-                profile_id: Some(profile_id),
-            } => Some(profile_id),
-            ModelRouteApiMethod::OpenAiCompatible { profile_id: None } => {
-                let provider = route.provider.trim();
-                let named_profile = crate::config::config()
-                    .providers
-                    .keys()
-                    .find(|name| name.eq_ignore_ascii_case(provider));
-                named_profile
-                    .cloned()
-                    .or_else(|| (!provider.is_empty()).then(|| "openai-compatible".to_string()))
-            }
-            ModelRouteApiMethod::Copilot => Some("copilot".to_string()),
-            ModelRouteApiMethod::Cursor => Some("cursor".to_string()),
-            ModelRouteApiMethod::Bedrock => Some("bedrock".to_string()),
-            ModelRouteApiMethod::CodeAssistOAuth => Some("gemini".to_string()),
-            ModelRouteApiMethod::AntigravityHttps => Some("antigravity".to_string()),
-            ModelRouteApiMethod::RemoteCatalog | ModelRouteApiMethod::Current => None,
-            ModelRouteApiMethod::Other(_) => {
-                let provider = route.provider.trim();
-                (!provider.is_empty()).then(|| provider.to_ascii_lowercase())
-            }
-        }
+        route_builders::route_provider_key(route)
     }
 
     fn canonical_route_candidate(route: &ModelRoute) -> Option<String> {
-        let provider = Self::route_provider_key(route)?;
-        if provider == "openrouter" && route.model.starts_with("openrouter/") {
-            Some(route.model.clone())
-        } else {
-            Some(jcode_provider_core::format_provider_model(
-                &provider,
-                &route.model,
-            ))
-        }
+        route_builders::canonical_route_identity(route)
     }
 
     fn active_routes_for_model(&self, model: &str) -> Vec<(String, ModelRoute)> {

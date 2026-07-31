@@ -1,6 +1,6 @@
 use super::pricing::{cheapness_for_route, openrouter_pricing_from_model_pricing};
-use super::{ModelRoute, RouteCostConfidence, RouteCostSource};
-use std::collections::BTreeSet;
+use super::{ModelRoute, ModelRouteApiMethod, RouteCostConfidence, RouteCostSource};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub fn is_listable_model_name(model: &str) -> bool {
     let trimmed = model.trim();
@@ -121,7 +121,10 @@ pub fn openrouter_catalog_model_id(model: &str) -> Option<String> {
 
 #[cfg(test)]
 mod identity_tests {
-    use super::openrouter_catalog_model_id;
+    use super::{
+        is_listable_model_name, listable_model_names_from_routes, openrouter_catalog_model_id,
+    };
+    use crate::provider::ModelRoute;
 
     #[test]
     fn custom_gpt_and_claude_ids_are_not_rewritten_as_native_openrouter_models() {
@@ -136,14 +139,139 @@ mod identity_tests {
         assert_eq!(openrouter_catalog_model_id("gpt-5.4-proxy"), None);
         assert_eq!(openrouter_catalog_model_id("claude-sonnet-custom"), None);
     }
+
+    fn route(model: &str, provider: &str, api_method: &str) -> ModelRoute {
+        ModelRoute {
+            model: model.to_string(),
+            provider: provider.to_string(),
+            api_method: api_method.to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        }
+    }
+
+    #[test]
+    fn listable_models_qualify_homonymous_ids_and_keep_unique_bare() {
+        let routes = vec![
+            route("gpt-5.6-sol", "Provider A", "openai-compatible:prov-a"),
+            route("only-here-9", "Provider C", "openai-compatible:prov-c"),
+            route("gpt-5.6-sol", "Provider B", "openai-compatible:prov-b"),
+        ];
+
+        assert!(is_listable_model_name("gpt-5.6-sol"));
+        assert!(is_listable_model_name("only-here-9"));
+
+        let listed = listable_model_names_from_routes(&routes);
+        assert_eq!(
+            listed,
+            vec![
+                "prov-a/gpt-5.6-sol".to_string(),
+                "only-here-9".to_string(),
+                "prov-b/gpt-5.6-sol".to_string(),
+            ]
+        );
+    }
 }
 
+/// Provider namespace for a route, used to build canonical `provider/model` ids.
+pub fn route_provider_key(route: &ModelRoute) -> Option<String> {
+    match route.api_method_kind() {
+        ModelRouteApiMethod::JcodeSubscription => Some("jcode".to_string()),
+        ModelRouteApiMethod::ClaudeOAuth | ModelRouteApiMethod::AnthropicApiKey => {
+            Some("claude".to_string())
+        }
+        ModelRouteApiMethod::OpenAIOAuth | ModelRouteApiMethod::OpenAIApiKey => {
+            Some("openai".to_string())
+        }
+        ModelRouteApiMethod::Other(method) if method == "chatgpt-web" => {
+            Some("openai".to_string())
+        }
+        ModelRouteApiMethod::OpenRouter => Some("openrouter".to_string()),
+        ModelRouteApiMethod::OpenAiCompatible {
+            profile_id: Some(profile_id),
+        } => Some(profile_id),
+        ModelRouteApiMethod::OpenAiCompatible { profile_id: None } => {
+            let provider = route.provider.trim();
+            let named_profile = crate::config::config()
+                .providers
+                .keys()
+                .find(|name| name.eq_ignore_ascii_case(provider));
+            named_profile
+                .cloned()
+                .or_else(|| (!provider.is_empty()).then(|| "openai-compatible".to_string()))
+        }
+        ModelRouteApiMethod::Copilot => Some("copilot".to_string()),
+        ModelRouteApiMethod::Cursor => Some("cursor".to_string()),
+        ModelRouteApiMethod::Bedrock => Some("bedrock".to_string()),
+        ModelRouteApiMethod::CodeAssistOAuth => Some("gemini".to_string()),
+        ModelRouteApiMethod::AntigravityHttps => Some("antigravity".to_string()),
+        ModelRouteApiMethod::RemoteCatalog | ModelRouteApiMethod::Current => None,
+        ModelRouteApiMethod::Other(_) => {
+            let provider = route.provider.trim();
+            (!provider.is_empty()).then(|| provider.to_ascii_lowercase())
+        }
+    }
+}
+
+/// Canonical `provider/model` identity for a route, if one can be derived.
+///
+/// OpenRouter-native ids that already start with `openrouter/` are returned
+/// unchanged so they are not double-wrapped.
+pub fn canonical_route_identity(route: &ModelRoute) -> Option<String> {
+    let provider = route_provider_key(route)?;
+    if provider == "openrouter" && route.model.starts_with("openrouter/") {
+        Some(route.model.clone())
+    } else {
+        Some(jcode_provider_core::format_provider_model(
+            &provider,
+            &route.model,
+        ))
+    }
+}
+
+
 pub fn listable_model_names_from_routes(routes: &[ModelRoute]) -> Vec<String> {
+    let mut bare_identity_counts: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    for route in routes {
+        if !is_listable_model_name(&route.model) {
+            continue;
+        }
+        if let Some(identity) = canonical_route_identity(route) {
+            bare_identity_counts
+                .entry(route.model.as_str())
+                .or_default()
+                .insert(identity);
+        }
+    }
+
     let mut models = Vec::new();
     let mut seen = BTreeSet::new();
     for route in routes {
-        if is_listable_model_name(&route.model) && seen.insert(route.model.clone()) {
-            models.push(route.model.clone());
+        if !is_listable_model_name(&route.model) {
+            continue;
+        }
+        let identity = match canonical_route_identity(route) {
+            Some(identity) => identity,
+            None => {
+                if seen.insert(route.model.clone()) {
+                    models.push(route.model.clone());
+                }
+                continue;
+            }
+        };
+        let bare = route.model.as_str();
+        let distinct = bare_identity_counts
+            .get(bare)
+            .map(|set| set.len())
+            .unwrap_or(0);
+        let emitted = if distinct <= 1 {
+            route.model.clone()
+        } else {
+            identity
+        };
+        if seen.insert(emitted.clone()) {
+            models.push(emitted);
         }
     }
     models
