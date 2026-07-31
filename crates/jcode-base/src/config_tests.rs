@@ -960,6 +960,11 @@ fn populate_context_limits_from_config_ref_seeds_global_cache() {
     // Regression test for issue #366: a named OpenAI-compatible provider with a
     // per-model `context_window` must be honored by the global context-limit
     // resolution path, not just the provider instance's own context_window().
+    // Hold the shared test env lock so concurrent provider-catalog tests cannot
+    // wipe CONTEXT_LIMIT_CACHE between seed and assert.
+    let _guard = crate::storage::lock_test_env();
+    crate::provider::models::reset_model_catalog_services_for_tests();
+
     let model_id = "issue366-custom-gateway-model";
     let mut cfg = Config::default();
     cfg.providers.insert(
@@ -982,6 +987,8 @@ fn populate_context_limits_from_config_ref_seeds_global_cache() {
         Some(1_000_000),
         "global context-limit resolution should respect named provider context_window"
     );
+
+    crate::provider::models::reset_model_catalog_services_for_tests();
 }
 
 #[test]

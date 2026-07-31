@@ -80,32 +80,34 @@ fn test_openai_live_catalog_replaces_static_fallback_list() {
 
 #[test]
 fn test_anthropic_live_catalog_replaces_static_fallback_list() {
-    let _guard = crate::storage::lock_test_env();
-    crate::env::remove_var("ANTHROPIC_API_KEY");
-    crate::auth::claude::set_active_account_override(Some("work".to_string()));
+    with_clean_provider_test_env(|| {
+        crate::env::remove_var("ANTHROPIC_API_KEY");
+        crate::auth::claude::set_active_account_override(Some("work".to_string()));
 
-    // Use a model the static classifier does not recognize so this exercises
-    // the generic catalog-driven path (>=1M cached limit => synthesized [1m]
-    // alias). The id must carry no parseable version, because any versioned
-    // Claude id is now classified statically (>=5.0 => native 1M, which
-    // deliberately gets no redundant [1m] alias).
-    populate_context_limits(
-        [("claude-nebula-preview".to_string(), 1_048_576)]
-            .into_iter()
-            .collect(),
-    );
-    populate_anthropic_models(vec!["claude-nebula-preview".to_string()]);
-    let models = known_anthropic_model_ids();
+        // Use a model the static classifier does not recognize so this exercises
+        // the generic catalog-driven path (>=1M cached limit => synthesized [1m]
+        // alias). The id must carry no parseable version, because any versioned
+        // Claude id is now classified statically (>=5.0 => native 1M, which
+        // deliberately gets no redundant [1m] alias).
+        models::populate_context_limits_for_provider(
+            "claude",
+            [("claude-nebula-preview".to_string(), 1_048_576)]
+                .into_iter()
+                .collect(),
+        );
+        populate_anthropic_models(vec!["claude-nebula-preview".to_string()]);
+        let models = known_anthropic_model_ids();
 
-    assert_eq!(
-        models,
-        vec![
-            "claude-nebula-preview".to_string(),
-            "claude-nebula-preview[1m]".to_string()
-        ]
-    );
+        assert_eq!(
+            models,
+            vec![
+                "claude-nebula-preview".to_string(),
+                "claude-nebula-preview[1m]".to_string()
+            ]
+        );
 
-    crate::auth::claude::set_active_account_override(None);
+        crate::auth::claude::set_active_account_override(None);
+    });
 }
 
 #[test]
