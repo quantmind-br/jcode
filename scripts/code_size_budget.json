@@ -76,7 +76,7 @@
     "crates/jcode-tui/src/tui/app/run_shell.rs": 1329,
     "crates/jcode-tui/src/tui/app/state_ui.rs": 2211,
     "crates/jcode-tui/src/tui/app/state_ui_input_helpers.rs": 2081,
-    "crates/jcode-tui/src/tui/app/tui_lifecycle.rs": 1336,
+    "crates/jcode-tui/src/tui/app/tui_lifecycle.rs": 1343,
     "crates/jcode-tui/src/tui/app/tui_state.rs": 2396,
     "crates/jcode-tui/src/tui/app/turn.rs": 1485,
     "crates/jcode-tui/src/tui/backend.rs": 1820,

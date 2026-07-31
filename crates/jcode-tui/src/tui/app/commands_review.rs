@@ -306,8 +306,10 @@ pub(super) fn reset_current_session(app: &mut App) {
     app.improve_mode = None;
     let mut session = Session::create(None, None);
     session.mark_active();
-    session.model = Some(app.provider.model());
-    session.provider_key = crate::session::derive_session_provider_key(app.provider.name());
+    crate::tui::app::model_context::model_route_metadata::stamp_session_route_metadata_from_provider(
+        &mut session,
+        app.provider.as_ref(),
+    );
     session.autoreview_enabled = Some(app.autoreview_enabled);
     session.autojudge_enabled = Some(app.autojudge_enabled);
     session.ensure_initial_session_context_message();

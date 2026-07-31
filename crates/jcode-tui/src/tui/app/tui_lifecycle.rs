@@ -344,11 +344,16 @@ impl App {
     ) -> Self {
         let skills = Arc::new(SkillRegistry::default());
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
-        if session.model.is_none() {
-            session.model = Some(provider.model());
-        }
-        if session.provider_key.is_none() {
-            session.provider_key = crate::session::derive_session_provider_key(provider.name());
+        if session.model.is_none()
+            || session.provider_key.is_none()
+            || session.model_identity_format.is_none()
+        {
+            // Preserve any already-persisted identity on resume; only fill gaps
+            // from the live provider, using display_name for named profiles.
+            crate::tui::app::model_context::model_route_metadata::fill_missing_session_route_metadata_from_provider(
+                &mut session,
+                provider.as_ref(),
+            );
         }
         let display = config().display.clone();
         let features = config().features.clone();
@@ -757,8 +762,10 @@ impl App {
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
         let mut session = Session::create(None, None);
         session.mark_active();
-        session.model = Some(provider.model());
-        session.provider_key = crate::session::derive_session_provider_key(provider.name());
+        crate::tui::app::model_context::model_route_metadata::stamp_session_route_metadata_from_provider(
+            &mut session,
+            provider.as_ref(),
+        );
         session.ensure_initial_session_context_message();
         let display = config().display.clone();
         let features = config().features.clone();

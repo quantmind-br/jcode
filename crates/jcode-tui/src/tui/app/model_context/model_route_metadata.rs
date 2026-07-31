@@ -87,3 +87,55 @@ pub(crate) fn apply_remote_model_switch_metadata(
         meta.model_identity_format,
     );
 }
+
+/// Stamp a newly created or incomplete session with the live provider's
+/// canonical provider/model identity. Named OpenAI-compatible profiles share
+/// the OpenRouter runtime slot (`name()`), so this uses `display_name()`.
+pub(crate) fn stamp_session_route_metadata_from_provider(
+    session: &mut crate::session::Session,
+    provider: &dyn crate::provider::Provider,
+) {
+    let provider_name = provider.display_name();
+    let meta = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
+        provider.model().as_str(),
+        &provider_name,
+        session.provider_key.as_deref(),
+    );
+    // Always write a complete identity snapshot for new/reset sessions.
+    session.model = Some(meta.model);
+    session.provider_key = meta.provider_key;
+    session.route_api_method = meta.route_api_method;
+    session.model_identity_format = Some(meta.model_identity_format);
+}
+
+/// Fill only missing session identity fields from the live provider.
+/// Used on resume when older sessions lack provider_key/model.
+pub(crate) fn fill_missing_session_route_metadata_from_provider(
+    session: &mut crate::session::Session,
+    provider: &dyn crate::provider::Provider,
+) {
+    if session.model.is_some()
+        && session.provider_key.is_some()
+        && session.model_identity_format.is_some()
+    {
+        return;
+    }
+    let provider_name = provider.display_name();
+    let meta = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
+        provider.model().as_str(),
+        &provider_name,
+        session.provider_key.as_deref(),
+    );
+    if session.model.is_none() {
+        session.model = Some(meta.model);
+    }
+    if session.provider_key.is_none() {
+        session.provider_key = meta.provider_key;
+    }
+    if session.route_api_method.is_none() {
+        session.route_api_method = meta.route_api_method;
+    }
+    if session.model_identity_format.is_none() {
+        session.model_identity_format = Some(meta.model_identity_format);
+    }
+}

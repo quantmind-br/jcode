@@ -539,7 +539,21 @@ impl Provider for NamedProvider {
     }
 
     fn name(&self) -> &str {
-        self.provider_name
+        // Machine-facing transport name. Named OpenAI-compatible profiles keep
+        // this as "openrouter" while display_name carries the profile id.
+        if self.provider_name.starts_with("profile:") {
+            "openrouter"
+        } else {
+            self.provider_name
+        }
+    }
+
+    fn display_name(&self) -> String {
+        if let Some(profile) = self.provider_name.strip_prefix("profile:") {
+            profile.to_string()
+        } else {
+            self.provider_name.to_string()
+        }
     }
 
     fn model(&self) -> String {
@@ -669,6 +683,37 @@ fn route_metadata_source_identity_tracks_named_profile_switch_without_env_swap()
     } else {
         crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
     }
+    if let Some(value) = previous_runtime {
+        crate::env::set_var("JCODE_RUNTIME_PROVIDER", value);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+    }
+}
+
+#[test]
+fn tui_startup_and_clear_stamp_named_profile_session_identity() {
+    // App::new / /clear must stamp canonical provider/model identity for named
+    // OpenAI-compatible profiles even though provider.name() is "openrouter".
+    let _env_lock = crate::storage::lock_test_env();
+    let previous_runtime = std::env::var_os("JCODE_RUNTIME_PROVIDER");
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "gemini");
+
+    let mut app = create_named_test_app("profile:prov-a", "gpt-5.6-sol");
+    assert_eq!(app.provider.name(), "openrouter");
+    assert_eq!(app.provider.display_name(), "prov-a");
+    assert_eq!(app.session.model.as_deref(), Some("prov-a/gpt-5.6-sol"));
+    assert_eq!(app.session.provider_key.as_deref(), Some("prov-a"));
+    assert_eq!(app.session.model_identity_format, Some(1));
+
+    // Pollute session fields then clear; /clear must re-stamp from live provider.
+    app.session.model = Some("openrouter/gpt-5.6-sol".to_string());
+    app.session.provider_key = Some("openrouter".to_string());
+    app.session.model_identity_format = Some(1);
+    assert!(super::commands::handle_session_command(&mut app, "/clear"));
+    assert_eq!(app.session.model.as_deref(), Some("prov-a/gpt-5.6-sol"));
+    assert_eq!(app.session.provider_key.as_deref(), Some("prov-a"));
+    assert_eq!(app.session.model_identity_format, Some(1));
+
     if let Some(value) = previous_runtime {
         crate::env::set_var("JCODE_RUNTIME_PROVIDER", value);
     } else {
