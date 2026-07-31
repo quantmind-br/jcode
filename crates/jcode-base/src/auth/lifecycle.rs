@@ -1954,10 +1954,8 @@ mod tests {
             ),
         ];
 
-        let forward_selected =
-            globally_preferred_default_route(&forward).expect("homonym route");
-        let reverse_selected =
-            globally_preferred_default_route(&reverse).expect("homonym route");
+        let forward_selected = globally_preferred_default_route(&forward).expect("homonym route");
+        let reverse_selected = globally_preferred_default_route(&reverse).expect("homonym route");
 
         assert_eq!(forward_selected.model, reverse_selected.model);
         assert_eq!(forward_selected.api_method, reverse_selected.api_method);

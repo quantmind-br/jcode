@@ -184,9 +184,7 @@ pub fn route_provider_key(route: &ModelRoute) -> Option<String> {
         ModelRouteApiMethod::OpenAIOAuth | ModelRouteApiMethod::OpenAIApiKey => {
             Some("openai".to_string())
         }
-        ModelRouteApiMethod::Other(method) if method == "chatgpt-web" => {
-            Some("openai".to_string())
-        }
+        ModelRouteApiMethod::Other(method) if method == "chatgpt-web" => Some("openai".to_string()),
         ModelRouteApiMethod::OpenRouter => Some("openrouter".to_string()),
         ModelRouteApiMethod::OpenAiCompatible {
             profile_id: Some(profile_id),
@@ -229,7 +227,6 @@ pub fn canonical_route_identity(route: &ModelRoute) -> Option<String> {
         ))
     }
 }
-
 
 pub fn listable_model_names_from_routes(routes: &[ModelRoute]) -> Vec<String> {
     let mut bare_identity_counts: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();

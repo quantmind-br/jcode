@@ -1295,9 +1295,9 @@ pub async fn login_and_bootstrap_provider(
             let model = crate::provider::activation::apply_azure_openai_runtime()?;
             let multi = provider::MultiProvider::new();
             if let Some(model) = model {
-                multi.set_model(&model).map_err(|err| {
-                    anyhow::anyhow!("Failed to select model '{model}': {err}")
-                })?;
+                multi
+                    .set_model(&model)
+                    .map_err(|err| anyhow::anyhow!("Failed to select model '{model}': {err}"))?;
             }
             Arc::new(multi)
         }
@@ -1514,9 +1514,9 @@ async fn init_provider_with_options(
             init_notice("Using Azure OpenAI as the initial provider (use /model to switch)");
             let multi = provider::MultiProvider::new_fast();
             if let Some(model) = model {
-                multi.set_model(&model).map_err(|err| {
-                    anyhow::anyhow!("Failed to select model '{model}': {err}")
-                })?;
+                multi
+                    .set_model(&model)
+                    .map_err(|err| anyhow::anyhow!("Failed to select model '{model}': {err}"))?;
             }
             Arc::new(multi)
         }
@@ -1818,16 +1818,14 @@ async fn init_provider_with_options(
 
     if let Some(model_name) = model {
         let spec = match explicit_provider_namespace(choice) {
-            Some(namespace)
-                if provider::parse_model_spec(model_name).provider.is_none() =>
-            {
+            Some(namespace) if provider::parse_model_spec(model_name).provider.is_none() => {
                 format!("{namespace}:{model_name}")
             }
             _ => model_name.to_string(),
         };
-        provider.set_model(&spec).map_err(|err| {
-            anyhow::anyhow!("Failed to select model '{model_name}': {err}")
-        })?;
+        provider
+            .set_model(&spec)
+            .map_err(|err| anyhow::anyhow!("Failed to select model '{model_name}': {err}"))?;
         init_notice(&format!("Using model: {model_name}"));
     }
 
