@@ -159,18 +159,16 @@ pub(crate) fn fill_missing_session_route_metadata_from_provider(
         // interpretation. Fresh models just filled from `meta` are already
         // format-1 identities and must not be re-run under format-none (that
         // would turn openrouter/custom-model into openrouter/openrouter/...).
-        if had_model {
-            if let Some(existing_model) = session.model.clone() {
-                let promoted =
-                    crate::provider::MultiProvider::canonical_session_model_with_identity_format(
-                        &existing_model,
-                        session.provider_key.as_deref(),
-                        session.route_api_method.as_deref(),
-                        None,
-                    );
-                if !promoted.is_empty() {
-                    session.model = Some(promoted);
-                }
+        if had_model && let Some(existing_model) = session.model.clone() {
+            let promoted =
+                crate::provider::MultiProvider::canonical_session_model_with_identity_format(
+                    &existing_model,
+                    session.provider_key.as_deref(),
+                    session.route_api_method.as_deref(),
+                    None,
+                );
+            if !promoted.is_empty() {
+                session.model = Some(promoted);
             }
         }
         session.model_identity_format = Some(meta.model_identity_format);
