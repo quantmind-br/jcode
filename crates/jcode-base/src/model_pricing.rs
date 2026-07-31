@@ -140,27 +140,87 @@ pub fn models_dev_provider_id(jcode_provider: &str) -> Option<&'static str> {
     })
 }
 
+fn models_dev_provider_candidates(jcode_provider: &str) -> Vec<String> {
+    let raw = jcode_provider.trim();
+    let key = raw
+        .strip_prefix("openai-compatible:")
+        .unwrap_or(raw)
+        .trim()
+        .to_ascii_lowercase();
+    let parsed_provider = jcode_provider_core::parse_model_spec(raw)
+        .provider
+        .map(|provider| provider.to_ascii_lowercase());
+
+    let mut candidates = Vec::new();
+    if let Some(provider_id) = models_dev_provider_id(raw) {
+        candidates.push(provider_id.to_string());
+    }
+    if let Some(provider) = parsed_provider {
+        if let Some(provider_id) = models_dev_provider_id(&provider) {
+            candidates.push(provider_id.to_string());
+        }
+        candidates.push(provider);
+    }
+    if !key.is_empty() {
+        candidates.push(key);
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
 /// Strip jcode-local suffixes/prefixes a model id may carry before catalog
 /// lookup (`[1m]` long-context alias, `provider/` prefixes for OpenRouter ids).
-fn normalize_model_id(model: &str) -> &str {
-    jcode_provider_core::model_id::strip_long_context_suffix(model).trim()
+fn normalize_model_id(model: &str) -> String {
+    jcode_provider_core::model_id::canonical(model)
+}
+
+fn provider_local_model_id(model: &str) -> String {
+    let model = normalize_model_id(model);
+    let parsed = jcode_provider_core::parse_model_spec(&model);
+    if parsed.provider.is_some() {
+        parsed.model
+    } else {
+        model
+    }
+}
+
+fn provider_local_fallback_is_safe(provider_id: &str, model: &str) -> bool {
+    let Some((prefix, _)) = model.split_once('/') else {
+        return false;
+    };
+    if provider_id == "openrouter" {
+        // OpenRouter catalog ids intentionally carry the upstream vendor in
+        // the model path; the OpenRouter bucket is the provider boundary.
+        return true;
+    }
+    models_dev_provider_id(prefix).is_some_and(|mapped| mapped == provider_id)
+        || prefix.eq_ignore_ascii_case(provider_id)
 }
 
 /// Look up live pricing for `model` under a jcode provider key. Returns `None`
 /// when the catalog has no entry; never blocks on the network. Schedules a
 /// background refresh when the disk cache is missing or stale.
 pub fn lookup(jcode_provider: &str, model: &str) -> Option<ModelCost> {
-    let provider_id = models_dev_provider_id(jcode_provider)?;
     let cache = ensure_cache_fresh()?;
-    let models = cache.providers.get(provider_id)?;
     let model = normalize_model_id(model);
-    if let Some(cost) = models.get(model) {
-        return Some(*cost);
-    }
-    // OpenRouter-style ids (`anthropic/claude-...`) may reach here with the
-    // provider prefix still attached; retry on the bare model name.
-    if let Some((_, bare)) = model.rsplit_once('/') {
-        return models.get(bare).copied();
+    let local = provider_local_model_id(&model);
+
+    for provider_id in models_dev_provider_candidates(jcode_provider) {
+        let Some(models) = cache.providers.get(&provider_id) else {
+            continue;
+        };
+        if let Some(cost) = models.get(&model) {
+            return Some(*cost);
+        }
+
+        // A provider-qualified model may be passed to a provider-local
+        // catalog. Strip only the explicit route prefix; never search another
+        // provider bucket and never use a bare fallback for a cross-provider
+        // request.
+        if local != model && provider_local_fallback_is_safe(&provider_id, &model) {
+            return models.get(&local).copied();
+        }
     }
     None
 }
@@ -262,7 +322,7 @@ fn parse_api_response(body: &str) -> anyhow::Result<PricingCache> {
                 continue;
             };
             parsed_models.insert(
-                model_id.clone(),
+                jcode_provider_core::model_id::canonical(model_id),
                 ModelCost {
                     input_usd_per_mtok: input,
                     output_usd_per_mtok: output,
@@ -412,6 +472,57 @@ mod tests {
         assert!((kimi.output_usd_per_mtok - 2.0).abs() < 1e-9);
 
         assert!(lookup("claude:api-key", "claude-unknown").is_none());
+
+        clear_memory_cache_for_tests();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn lookup_never_crosses_models_dev_provider_buckets() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        clear_memory_cache_for_tests();
+
+        save_test_cache(&[
+            (
+                "openai",
+                "shared-model",
+                ModelCost {
+                    input_usd_per_mtok: 1.0,
+                    output_usd_per_mtok: 2.0,
+                    cache_read_usd_per_mtok: None,
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "deepseek",
+                "shared-model",
+                ModelCost {
+                    input_usd_per_mtok: 3.0,
+                    output_usd_per_mtok: 4.0,
+                    cache_read_usd_per_mtok: None,
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            lookup("openai", "shared-model").unwrap().input_usd_per_mtok,
+            1.0
+        );
+        assert_eq!(
+            lookup("openai-compatible:deepseek", "shared-model")
+                .unwrap()
+                .input_usd_per_mtok,
+            3.0
+        );
+        assert!(lookup("openai-compatible:unknown-profile", "shared-model").is_none());
 
         clear_memory_cache_for_tests();
         if let Some(prev) = prev_home {

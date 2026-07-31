@@ -117,6 +117,10 @@ pub struct Session {
     /// "openai-compatible:nvidia-nim", "openai-api").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_api_method: Option<String>,
+    /// Version marker for the canonical provider/model session identity.
+    /// Missing means the historical bare/legacy interpretation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_identity_format: Option<u8>,
     /// Provider reasoning/thinking effort for this session (e.g., OpenAI low|medium|high|xhigh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
@@ -208,6 +212,8 @@ struct SessionStartupStub {
     model: Option<String>,
     #[serde(default)]
     route_api_method: Option<String>,
+    #[serde(default)]
+    model_identity_format: Option<u8>,
     #[serde(default)]
     reasoning_effort: Option<String>,
     #[serde(default)]
@@ -317,6 +323,7 @@ impl Session {
         session.provider_key = stub.provider_key;
         session.model = stub.model;
         session.route_api_method = stub.route_api_method;
+        session.model_identity_format = stub.model_identity_format;
         session.reasoning_effort = stub.reasoning_effort;
         session.subagent_model = stub.subagent_model;
         session.improve_mode = stub.improve_mode;
@@ -352,6 +359,7 @@ impl Session {
         session.provider_key = snapshot.provider_key;
         session.model = snapshot.model;
         session.route_api_method = snapshot.route_api_method;
+        session.model_identity_format = snapshot.model_identity_format;
         session.reasoning_effort = snapshot.reasoning_effort;
         session.subagent_model = snapshot.subagent_model;
         session.improve_mode = snapshot.improve_mode;
@@ -489,6 +497,8 @@ impl Session {
             provider_session_id: self.provider_session_id.clone(),
             provider_key: self.provider_key.clone(),
             model: self.model.clone(),
+            route_api_method: self.route_api_method.clone(),
+            model_identity_format: self.model_identity_format,
             reasoning_effort: self.reasoning_effort.clone(),
             subagent_model: self.subagent_model.clone(),
             improve_mode: self.improve_mode,
@@ -690,6 +700,8 @@ impl Session {
         self.provider_session_id = meta.provider_session_id;
         self.provider_key = meta.provider_key;
         self.model = meta.model;
+        self.route_api_method = meta.route_api_method;
+        self.model_identity_format = meta.model_identity_format;
         self.reasoning_effort = meta.reasoning_effort;
         self.subagent_model = meta.subagent_model;
         self.improve_mode = meta.improve_mode;
@@ -730,6 +742,7 @@ impl Session {
             provider_key: None,
             model: None,
             route_api_method: None,
+            model_identity_format: Some(1),
             reasoning_effort: None,
             subagent_model: None,
             improve_mode: None,
@@ -784,6 +797,7 @@ impl Session {
             provider_key: None,
             model: None,
             route_api_method: None,
+            model_identity_format: Some(1),
             reasoning_effort: None,
             subagent_model: None,
             improve_mode: None,
@@ -1585,6 +1599,8 @@ struct RemoteStartupSessionSnapshot {
     model: Option<String>,
     #[serde(default)]
     route_api_method: Option<String>,
+    #[serde(default)]
+    model_identity_format: Option<u8>,
     #[serde(default)]
     reasoning_effort: Option<String>,
     #[serde(default)]

@@ -82,9 +82,30 @@ pub(crate) fn ensure_model_allowed_for_subscription(model: &str) -> Result<()> {
     Ok(())
 }
 
-/// Dynamic cache of model context window sizes, populated from API at startup.
-static CONTEXT_LIMIT_CACHE: std::sync::LazyLock<RwLock<HashMap<String, usize>>> =
-    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+/// A context-limit entry is provider-local.  Keeping the provider/profile in
+/// the key is important for OpenAI-compatible endpoints: `gpt-x` (or any
+/// other opaque id) is allowed to mean different things on two configured
+/// gateways.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ContextLimitKey {
+    provider: String,
+    model: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ContextLimitCache {
+    configured: HashMap<ContextLimitKey, usize>,
+    live: HashMap<ContextLimitKey, usize>,
+    /// Bare entries written by older callers.  `None` means that more than one
+    /// legacy writer supplied different values, so the entry must never be
+    /// used as a provider selector.
+    legacy: HashMap<String, Option<usize>>,
+}
+
+/// Dynamic cache of model context window sizes, populated from API/config at
+/// startup.  Entries are scoped by provider/profile rather than bare model id.
+static CONTEXT_LIMIT_CACHE: std::sync::LazyLock<RwLock<ContextLimitCache>> =
+    std::sync::LazyLock::new(|| RwLock::new(ContextLimitCache::default()));
 
 #[derive(Debug, Clone)]
 struct RuntimeProviderUnavailability {
@@ -197,6 +218,32 @@ fn current_claude_account_scope() -> String {
         .map(|label| label.trim().to_string())
         .filter(|label| !label.is_empty())
         .unwrap_or_else(|| "default".to_string())
+}
+
+/// Return the provider namespace used by native OpenAI context-limit lookups
+/// for one catalog fetch.  The account label must be captured before the
+/// request and reused when the response is applied so an account switch cannot
+/// attach the response to the wrong native cache.
+pub fn openai_context_scope_for_account(account_label: Option<&str>) -> String {
+    format!(
+        "openai::{}",
+        openai_account_scope_from_label(account_label.map(ToOwned::to_owned))
+    )
+}
+
+/// Return the provider namespace used by native Anthropic/Claude
+/// context-limit lookups for one catalog fetch.  Both the direct Anthropic
+/// runtime and the Claude CLI runtime resolve context through the canonical
+/// `claude` provider hint, so their account-scoped catalog values share this
+/// exact namespace regardless of which native transport fetched them.
+pub fn anthropic_context_scope_for_account(account_label: Option<&str>) -> String {
+    format!(
+        "claude::{}",
+        account_label
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| "default")
+    )
 }
 
 fn current_anthropic_catalog_scope() -> String {
@@ -413,7 +460,12 @@ fn hydrate_catalog_cache_from_disk(
     let observed_at = system_time_from_unix_secs(persisted.observed_at_unix_secs);
     service.hydrate_scope_models_from_snapshot(scope, normalized, observed_at);
     if !persisted.context_limits.is_empty() {
-        populate_context_limits(persisted.context_limits.clone());
+        let provider = if file_name == OPENAI_MODEL_CATALOG_CACHE_FILE {
+            "openai"
+        } else {
+            "claude"
+        };
+        populate_context_limits_for_provider(provider, persisted.context_limits.clone());
     }
 
     Some(model_ids_with_context_aliases(persisted.models))
@@ -473,24 +525,248 @@ pub fn persist_anthropic_model_catalog(catalog: &AnthropicModelCatalog) {
     );
 }
 
-/// Look up a cached context limit for a model.
-fn get_cached_context_limit(model: &str) -> Option<usize> {
-    let cache = CONTEXT_LIMIT_CACHE.read().ok()?;
-    cache.get(model).copied()
+fn context_model_keys(model: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    fn push_key(keys: &mut Vec<String>, value: &str) {
+        let value = normalize_model_id(value);
+        if !value.is_empty() && !keys.iter().any(|existing| existing == &value) {
+            keys.push(value);
+        }
+    }
+
+    push_key(&mut keys, model);
+    let parsed = jcode_provider_core::parse_model_spec(model);
+    if parsed.provider.is_some() {
+        push_key(&mut keys, &parsed.model);
+    }
+    let slash_keys = keys.clone();
+    let slash_bases: Vec<String> = slash_keys
+        .iter()
+        .map(|key| jcode_provider_core::model_id::slash_base(key).to_string())
+        .collect();
+    for slash_base in slash_bases {
+        push_key(&mut keys, &slash_base);
+    }
+    keys
 }
 
-/// Populate the context limit cache from API-provided model data.
-/// Called once at startup when OpenAI OAuth credentials are available.
+fn context_provider_scope(provider: Option<&str>, model: &str) -> Option<String> {
+    let provider = provider
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            let parsed = jcode_provider_core::parse_model_spec(model);
+            parsed.provider
+        })?;
+
+    let provider = provider
+        .strip_prefix("openai-compatible:")
+        .unwrap_or(&provider)
+        .trim()
+        .to_ascii_lowercase();
+    if provider.is_empty() {
+        return None;
+    }
+
+    // Account labels are part of the provider/profile identity for the native
+    // credential-backed catalogs.  Named compatible profiles remain exactly
+    // their configured id, so two profiles never collide here.
+    Some(match provider.as_str() {
+        "openai" => {
+            openai_context_scope_for_account(auth::codex::active_account_label().as_deref())
+        }
+        "claude" | "anthropic" => {
+            anthropic_context_scope_for_account(auth::claude::active_account_label().as_deref())
+        }
+        _ => provider,
+    })
+}
+
+fn rebuild_legacy_context_entries(cache: &mut ContextLimitCache) {
+    let mut values: HashMap<String, HashSet<usize>> = HashMap::new();
+    for entries in [&cache.configured, &cache.live] {
+        for (key, limit) in entries {
+            values.entry(key.model.clone()).or_default().insert(*limit);
+        }
+    }
+
+    for (model, value) in cache.legacy.iter_mut() {
+        let Some(scoped_values) = values.get(model) else {
+            continue;
+        };
+        if scoped_values.len() > 1 {
+            *value = None;
+        } else if let Some(limit) = scoped_values.iter().next().copied() {
+            *value = Some(limit);
+        }
+    }
+}
+
+fn insert_context_limits(
+    target: &mut HashMap<ContextLimitKey, usize>,
+    provider: &str,
+    models: HashMap<String, usize>,
+) {
+    let provider = provider.trim().to_ascii_lowercase();
+    for (model, limit) in models {
+        for key in context_model_keys(&model) {
+            target.insert(
+                ContextLimitKey {
+                    provider: provider.clone(),
+                    model: key,
+                },
+                limit,
+            );
+        }
+    }
+}
+
+fn cached_context_limit_for_model(
+    model: &str,
+    provider: Option<&str>,
+    transformed_model: Option<&str>,
+) -> Option<usize> {
+    let cache = CONTEXT_LIMIT_CACHE.read().ok()?;
+    let mut models = context_model_keys(model);
+    if let Some(transformed_model) = transformed_model {
+        for key in context_model_keys(transformed_model) {
+            if !models.iter().any(|existing| existing == &key) {
+                models.push(key);
+            }
+        }
+    }
+
+    if let Some(provider_scope) = context_provider_scope(provider, model) {
+        for model in &models {
+            let key = ContextLimitKey {
+                provider: provider_scope.clone(),
+                model: model.clone(),
+            };
+            if let Some(limit) = cache.configured.get(&key).or_else(|| cache.live.get(&key)) {
+                return Some(*limit);
+            }
+        }
+    }
+
+    // An unqualified lookup is allowed to use a scoped value only when all
+    // matching provider/profile entries agree.  Configured values are the
+    // current complete snapshot and therefore take precedence over older live
+    // observations.
+    let mut configured_values = HashSet::new();
+    let mut live_values = HashSet::new();
+    for model in &models {
+        for (key, limit) in &cache.configured {
+            if key.model == *model {
+                configured_values.insert(*limit);
+            }
+        }
+        for (key, limit) in &cache.live {
+            if key.model == *model {
+                live_values.insert(*limit);
+            }
+        }
+    }
+    let explicit_provider = provider.is_some()
+        || jcode_provider_core::parse_model_spec(model)
+            .provider
+            .is_some();
+    if !explicit_provider {
+        let values = if configured_values.is_empty() {
+            &live_values
+        } else {
+            &configured_values
+        };
+        if values.len() == 1 {
+            return values.iter().copied().next();
+        }
+        if values.len() > 1 {
+            return None;
+        }
+    }
+
+    if !explicit_provider && configured_values.is_empty() && live_values.is_empty() {
+        for model in &models {
+            if let Some(Some(limit)) = cache.legacy.get(model) {
+                return Some(*limit);
+            }
+        }
+    }
+    None
+}
+
+/// Look up a cached context limit for a model.
+fn get_cached_context_limit(model: &str) -> Option<usize> {
+    cached_context_limit_for_model(model, None, None)
+}
+
+/// Legacy compatibility wrapper for callers that cannot yet provide a route
+/// scope. New live catalog paths must call [`populate_context_limits_for_provider`]
+/// with an explicit provider/profile identity. Only known curated native ids
+/// are scoped here; opaque ids remain legacy/unambiguous-only and are never
+/// classified as OpenAI or Anthropic by shape.
 pub fn populate_context_limits(models: HashMap<String, usize>) {
+    let legacy_models = models.clone();
+    let mut grouped: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    for (model, limit) in models {
+        if let Some(provider) = jcode_provider_core::parse_model_spec(&model)
+            .provider
+            .map(|provider| provider.to_ascii_lowercase())
+        {
+            grouped.entry(provider).or_default().insert(model, limit);
+        } else if jcode_provider_core::model_id::matches_known_model(&model, ALL_CLAUDE_MODELS) {
+            grouped
+                .entry("claude".to_string())
+                .or_default()
+                .insert(model, limit);
+        } else if jcode_provider_core::model_id::matches_known_model(&model, ALL_OPENAI_MODELS) {
+            grouped
+                .entry("openai".to_string())
+                .or_default()
+                .insert(model, limit);
+        }
+    }
+    for (provider, models) in grouped {
+        populate_context_limits_for_provider(&provider, models);
+    }
+    if let Ok(mut cache) = CONTEXT_LIMIT_CACHE.write() {
+        for (model, limit) in legacy_models {
+            let model = normalize_model_id(&model);
+            if model.is_empty() {
+                continue;
+            }
+            match cache.legacy.get(&model).copied().flatten() {
+                Some(previous) if previous != limit => {
+                    cache.legacy.insert(model, None);
+                }
+                None if cache.legacy.contains_key(&model) => {}
+                _ => {
+                    cache.legacy.insert(model, Some(limit));
+                }
+            }
+        }
+        rebuild_legacy_context_entries(&mut cache);
+    }
+}
+
+/// Populate live context limits for one explicit provider/profile namespace.
+/// OpenAI-compatible runtimes should use this when their catalog contains
+/// opaque ids that cannot safely be classified from the model name.
+pub fn populate_context_limits_for_provider(provider: &str, models: HashMap<String, usize>) {
+    let Some(provider) = context_provider_scope(Some(provider), "") else {
+        return;
+    };
     if let Ok(mut cache) = CONTEXT_LIMIT_CACHE.write() {
         for (model, limit) in &models {
             crate::logging::info(&format!(
-                "Context limit cache: {} = {}k",
+                "Context limit cache [{}]: {} = {}k",
+                provider,
                 model,
                 limit / 1000
             ));
-            cache.insert(model.clone(), *limit);
         }
+        insert_context_limits(&mut cache.live, &provider, models);
+        rebuild_legacy_context_entries(&mut cache);
     }
 }
 
@@ -527,13 +803,92 @@ pub fn populate_context_limits_from_config_value(cfg: &crate::config::Config) {
             let Some(limit) = model.context_window else {
                 continue;
             };
+            limits.insert(
+                ContextLimitKey {
+                    provider: profile_id.trim().to_ascii_lowercase(),
+                    model: normalize_model_id(&model.id),
+                },
+                limit,
+            );
             for key in config_context_limit_cache_keys(profile_id, &model.id) {
-                limits.insert(key, limit);
+                limits.insert(
+                    ContextLimitKey {
+                        provider: profile_id.trim().to_ascii_lowercase(),
+                        model: normalize_model_id(&key),
+                    },
+                    limit,
+                );
             }
         }
     }
-    if !limits.is_empty() {
-        populate_context_limits(limits);
+    if let Ok(mut cache) = CONTEXT_LIMIT_CACHE.write() {
+        // The config is the complete configured-limit snapshot. Replacing the
+        // map removes entries for profiles/models deleted or unset by reload.
+        cache.configured = limits;
+        rebuild_legacy_context_entries(&mut cache);
+    }
+}
+
+#[cfg(test)]
+mod scoped_context_tests {
+    use super::*;
+
+    #[test]
+    fn named_profiles_keep_same_model_context_windows_distinct() {
+        let mut cfg = crate::config::Config::default();
+        for (profile, limit) in [("solar", 128_000), ("open", 1_000_000)] {
+            cfg.providers.insert(
+                profile.to_string(),
+                crate::config::NamedProviderConfig {
+                    base_url: format!("https://{profile}.example.test/v1"),
+                    models: vec![crate::config::NamedProviderModelConfig {
+                        id: "gpt-x".to_string(),
+                        context_window: Some(limit),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            );
+        }
+        populate_context_limits_from_config_value(&cfg);
+
+        assert_eq!(
+            context_limit_for_model_with_provider("gpt-x", Some("solar")),
+            Some(128_000)
+        );
+        assert_eq!(
+            context_limit_for_model_with_provider("gpt-x", Some("open")),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn config_snapshot_removes_removed_profile_limits() {
+        let mut cfg = crate::config::Config::default();
+        cfg.providers.insert(
+            "stale-profile".to_string(),
+            crate::config::NamedProviderConfig {
+                base_url: "https://stale.example.test/v1".to_string(),
+                models: vec![crate::config::NamedProviderModelConfig {
+                    id: "stale-model".to_string(),
+                    context_window: Some(123_000),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        populate_context_limits_from_config_value(&cfg);
+        assert_eq!(
+            context_limit_for_model_with_provider("stale-model", Some("stale-profile")),
+            Some(123_000)
+        );
+
+        let empty = crate::config::Config::default();
+        populate_context_limits_from_config_value(&empty);
+        assert_eq!(
+            context_limit_for_model_with_provider("stale-model", Some("stale-profile")),
+            Some(jcode_provider_core::DEFAULT_CONTEXT_LIMIT)
+        );
     }
 }
 
@@ -858,7 +1213,10 @@ pub fn refresh_openai_model_catalog_in_background(
                 ));
                 persist_openai_model_catalog(&catalog);
                 if !catalog.context_limits.is_empty() {
-                    populate_context_limits(catalog.context_limits.clone());
+                    populate_context_limits_for_provider(
+                        &format!("openai::{}", scope),
+                        catalog.context_limits.clone(),
+                    );
                 }
                 if !catalog.available_models.is_empty() {
                     populate_account_models_for_scope(&scope, catalog.available_models.clone());
@@ -1113,7 +1471,32 @@ pub fn context_limit_for_model_with_provider(
     model: &str,
     provider_hint: Option<&str>,
 ) -> Option<usize> {
-    context_limit_for_model_with_provider_and_cache(model, provider_hint, get_cached_context_limit)
+    // An explicit compatible profile is an opaque provider namespace.  Check
+    // its scoped cache before the shared core classifier, whose family rules
+    // intentionally recognize `gpt-*`/`claude-*` as native models.
+    if provider_hint.is_some_and(|provider| provider_key_from_hint(Some(provider)).is_none()) {
+        return cached_context_limit_for_model(model, provider_hint, None)
+            .or(Some(jcode_provider_core::DEFAULT_CONTEXT_LIMIT));
+    }
+
+    // Native OpenAI's GPT-5.4 family has a canonical 1M static capability.
+    // A prior native catalog refresh may have written a shorter value (such as
+    // 272K) into the legacy/shared cache.  Do not let that cache observation
+    // override the known native model rule; direct compatible profiles have
+    // already returned through their explicit opaque namespace above.
+    let is_native_openai =
+        provider_hint.and_then(|provider| provider_key_from_hint(Some(provider))) == Some("openai");
+    let normalized_model = normalize_model_id(model);
+    if is_native_openai
+        && normalized_model.starts_with("gpt-5.4")
+        && jcode_provider_core::model_id::matches_known_model(&normalized_model, ALL_OPENAI_MODELS)
+    {
+        return Some(1_000_000);
+    }
+
+    context_limit_for_model_with_provider_and_cache(model, provider_hint, |lookup| {
+        cached_context_limit_for_model(model, provider_hint, Some(lookup))
+    })
 }
 
 pub fn resolve_model_capabilities(model: &str, provider_hint: Option<&str>) -> ModelCapabilities {

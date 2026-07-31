@@ -35,9 +35,8 @@ pub use jcode_provider_openrouter::{
 };
 use jcode_provider_openrouter::{
     KIMI_FALLBACK_PROVIDERS, ModelCatalogRefreshState, ModelsCache, ParsedProvider, PinSource,
-    ProviderPin, current_unix_secs, known_providers, load_endpoints_disk_cache, parse_model_spec,
-    save_disk_cache_with_source, save_disk_cache_with_source_for_namespace,
-    save_endpoints_disk_cache,
+    ProviderPin, current_unix_secs, known_providers, parse_model_spec,
+    save_disk_cache_with_source_for_namespace,
 };
 use reqwest::Client;
 use reqwest::header::HeaderName;
@@ -80,6 +79,14 @@ const STANDARD_OPENROUTER_CATALOG_TTL_SECS: u64 = 24 * 60 * 60;
 /// Endpoints cache TTL (1 hour) - per-model provider endpoint data
 const ENDPOINTS_CACHE_TTL_SECS: u64 = 60 * 60;
 const MAX_BACKGROUND_ENDPOINT_REFRESHES: usize = 8;
+
+/// The metadata catalog also exposes the public OpenRouter endpoint as an
+/// OpenAI-compatible doctor profile (`openrouter`). That is not a distinct
+/// runtime identity: the public endpoint always belongs to RuntimeKey/OpenRouter.
+fn is_public_openrouter_api_base(api_base: &str) -> bool {
+    normalize_api_base(api_base)
+        .is_some_and(|normalized| normalized.eq_ignore_ascii_case(DEFAULT_API_BASE))
+}
 
 fn explicit_openrouter_runtime_configured() -> bool {
     [
@@ -512,7 +519,7 @@ async fn fetch_models_from_api(
     api_base: String,
     auth: ProviderAuth,
     models_cache: Arc<RwLock<ModelsCache>>,
-    cache_namespace: Option<String>,
+    cache_namespace: String,
 ) -> Result<Vec<ModelInfo>> {
     let url = format!("{}/models", api_base);
     let response =
@@ -552,11 +559,22 @@ async fn fetch_models_from_api(
             )
         })?;
 
-    if let Some(namespace) = cache_namespace.as_deref() {
-        save_disk_cache_with_source_for_namespace(namespace, &models, Some(&api_base));
-    } else {
-        save_disk_cache_with_source(&models, Some(&api_base));
+    let context_limits = models
+        .iter()
+        .filter_map(|model| {
+            model
+                .context_length
+                .map(|limit| (format!("{cache_namespace}/{}", model.id), limit as usize))
+        })
+        .collect::<HashMap<_, _>>();
+    if !context_limits.is_empty() {
+        // Unlike the native OpenAI/Anthropic catalogs, compatible endpoints
+        // expose opaque ids (including ids that happen to start with `gpt-` or
+        // `claude-`). Keep the live values under the explicit profile route.
+        jcode_base::provider::populate_context_limits(context_limits);
     }
+
+    save_disk_cache_with_source_for_namespace(&cache_namespace, &models, Some(&api_base));
 
     if let Some(now) = current_unix_secs() {
         let mut cache = models_cache.write().await;
@@ -842,7 +860,7 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
             api_base,
             auth,
             models_cache,
-            Some(profile_id.clone()),
+            profile_id.clone(),
         )
         .await;
         let succeeded = result.is_ok();
@@ -950,7 +968,7 @@ pub fn maybe_schedule_standard_openrouter_catalog_refresh(context: &'static str)
             api_base,
             auth,
             models_cache,
-            Some(namespace.to_string()),
+            namespace.to_string(),
         )
         .await;
         let succeeded = result.is_ok();
@@ -1282,6 +1300,42 @@ impl OpenRouterProvider {
         self.supports_provider_features
     }
 
+    pub(crate) fn cache_namespace(&self) -> String {
+        self.profile_id.clone().unwrap_or_else(|| {
+            if self.supports_provider_features {
+                "openrouter".to_string()
+            } else {
+                jcode_base::provider_catalog::openai_compatible_profile_id_for_api_base(
+                    &self.api_base,
+                )
+                .unwrap_or("openai-compatible")
+                .to_string()
+            }
+        })
+    }
+
+    fn load_endpoint_cache(&self, model: &str) -> Option<Vec<EndpointInfo>> {
+        jcode_provider_openrouter::load_endpoints_disk_cache_for_namespace(
+            &self.cache_namespace(),
+            model,
+        )
+    }
+
+    fn load_endpoint_cache_public(&self, model: &str) -> Option<(Vec<EndpointInfo>, u64)> {
+        jcode_provider_openrouter::load_endpoints_disk_cache_for_namespace_public(
+            &self.cache_namespace(),
+            model,
+        )
+    }
+
+    fn save_endpoint_cache(&self, model: &str, endpoints: &[EndpointInfo]) {
+        jcode_provider_openrouter::save_endpoints_disk_cache_for_namespace(
+            &self.cache_namespace(),
+            model,
+            endpoints,
+        );
+    }
+
     /// Human-facing label for the runtime backing this provider instance.
     ///
     /// Unlike the env-var based [`jcode_base::provider_catalog::runtime_provider_display_name`],
@@ -1328,7 +1382,12 @@ impl OpenRouterProvider {
     }
 
     pub fn direct_openai_compatible_route_parts(&self) -> Option<(String, String, String)> {
-        if self.supports_provider_features {
+        // The public aggregator may be discovered through the metadata
+        // profile whose id is also `openrouter`.  That metadata id must not
+        // turn the real OpenRouter runtime into a direct compatible route.
+        // Other routing-enabled named/built-in profiles keep their explicit
+        // profile identity and are intentionally returned below.
+        if is_public_openrouter_api_base(&self.api_base) {
             return None;
         }
 
@@ -1377,15 +1436,10 @@ impl OpenRouterProvider {
         profile_name: &str,
         profile: &jcode_base::config::NamedProviderConfig,
     ) -> Result<Self> {
-        // The OpenRouter/OpenAI-compatible catalog cache helpers are currently
-        // process-env scoped. Named provider profiles are constructed directly
-        // in several CLI/TUI paths, so make sure their cache namespace is active
-        // before any model-cache reads/writes happen. Without this, a custom
-        // endpoint can accidentally display the default OpenRouter catalog.
-        jcode_base::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", profile_name);
         let api_base = normalize_api_base(&profile.base_url).ok_or_else(|| {
             anyhow::anyhow!("Provider profile '{}' has invalid base_url", profile_name)
         })?;
+        let is_public_openrouter = is_public_openrouter_api_base(&api_base);
         let key_env = profile
             .api_key_env
             .as_deref()
@@ -1475,7 +1529,9 @@ impl OpenRouterProvider {
                     profile.provider_type,
                     jcode_base::config::NamedProviderType::OpenRouter
                 ),
-            profile_id: Some(profile_name.to_string()),
+            // A named profile pointing at the public OpenRouter endpoint is
+            // still the public aggregator, not a distinct compatible runtime.
+            profile_id: (!is_public_openrouter).then(|| profile_name.to_string()),
             reasoning_effort_support: profile.supports_reasoning_effort,
             max_tokens: Self::configured_max_tokens(Some(profile_name)),
             extra_body: Self::resolve_extra_body(
@@ -1604,19 +1660,25 @@ impl OpenRouterProvider {
         let supports_model_catalog = model_catalog_enabled();
         let send_openrouter_headers = supports_provider_features;
         let auth = Self::resolve_auth()?;
-        let profile_id = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
-            .ok()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty())
-            .and_then(|id| openai_compatible_profile_by_id(&id).map(|_| id))
-            .or_else(|| {
+        // The public OpenRouter aggregator is a runtime identity in its own
+        // right.  Its API base also appears in the metadata catalog as an
+        // OpenAI-compatible profile (id `openrouter`), but retaining that
+        // metadata id here makes the aggregator look like a direct profile
+        // after a route switch.  Only direct endpoints may derive a profile
+        // id from their API base; named routing-enabled profiles keep the id
+        // supplied by their dedicated constructor below.
+        let profile_id = (!supports_provider_features)
+            .then(|| {
                 autodetected_profile
                     .as_ref()
                     .map(|profile| profile.id.clone())
+                    .or_else(|| {
+                        openai_compatible_profile_id_for_api_base(&api_base)
+                            .map(ToString::to_string)
+                    })
             })
-            .or_else(|| {
-                openai_compatible_profile_id_for_api_base(&api_base).map(ToString::to_string)
-            });
+            .flatten()
+            .filter(|_| !is_public_openrouter_api_base(&api_base));
         let static_context_limits = profile_id
             .as_deref()
             .and_then(openai_compatible_profile_by_id)
@@ -1638,12 +1700,6 @@ impl OpenRouterProvider {
                     .map(openai_compatible_profile_static_models)
                     .unwrap_or_default()
             });
-
-        if std::env::var_os("JCODE_OPENROUTER_CACHE_NAMESPACE").is_none()
-            && let Some(profile) = autodetected_profile.as_ref()
-        {
-            jcode_base::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", &profile.id);
-        }
 
         let model = std::env::var("JCODE_OPENROUTER_MODEL")
             .ok()
@@ -1745,6 +1801,15 @@ impl OpenRouterProvider {
                 resolved.api_base
             )
         })?;
+
+        // `openrouter` is listed in metadata for doctor/probe coverage, but
+        // the public endpoint can never create an OpenAiCompatible runtime.
+        // Delegate to the real OpenRouter constructor before assigning any
+        // profile-local identity or state.
+        if is_public_openrouter_api_base(&api_base) {
+            return Self::new_openrouter_api_key_runtime();
+        }
+
         let auth = match load_api_key_from_env_or_config(&resolved.api_key_env, &resolved.env_file)
         {
             Some(token) => ProviderAuth::AuthorizationBearer {
@@ -2060,7 +2125,7 @@ impl OpenRouterProvider {
         let models_cache = Arc::clone(&self.models_cache);
         let refresh_state = Arc::clone(&self.model_catalog_refresh);
         let previous_fingerprint = self.cached_model_catalog_fingerprint();
-        let ns = self.foreground_cache_namespace();
+        let ns = self.cache_namespace();
         handle.spawn(async move {
             match fetch_models_from_api(client, api_base, auth, models_cache, ns).await {
                 Ok(models) => {
@@ -2187,7 +2252,7 @@ impl OpenRouterProvider {
         }
 
         let ranked = {
-            let mut endpoints = load_endpoints_disk_cache(model).or_else(|| {
+            let mut endpoints = self.load_endpoint_cache(model).or_else(|| {
                 let cache = self.endpoints_cache.try_read().ok()?;
                 cache.get(model).map(|(_, eps)| eps.clone())
             });
@@ -2270,7 +2335,7 @@ impl OpenRouterProvider {
         }
 
         // Fall back to ranked endpoint data
-        let endpoints = load_endpoints_disk_cache(&model).or_else(|| {
+        let endpoints = self.load_endpoint_cache(&model).or_else(|| {
             self.endpoints_cache
                 .try_read()
                 .ok()?
@@ -2301,7 +2366,7 @@ impl OpenRouterProvider {
 
         let mut providers: Vec<String> = Vec::new();
 
-        if let Some(endpoints) = load_endpoints_disk_cache(model) {
+        if let Some(endpoints) = self.load_endpoint_cache(model) {
             providers.extend(endpoints.into_iter().map(|e| e.provider_name));
         } else if let Ok(cache) = self.endpoints_cache.try_read()
             && let Some((_, endpoints)) = cache.get(model)
@@ -2317,7 +2382,7 @@ impl OpenRouterProvider {
                 false,
             );
             providers = known_providers();
-        } else if let Some((_, age)) = load_endpoints_disk_cache_public(model) {
+        } else if let Some((_, age)) = self.load_endpoint_cache_public(model) {
             self.maybe_schedule_endpoint_refresh(
                 model,
                 Some(age),
@@ -2338,8 +2403,8 @@ impl OpenRouterProvider {
         }
 
         // Try endpoints disk cache first (has pricing, uptime, cache info)
-        if let Some(endpoints) = load_endpoints_disk_cache(model) {
-            if let Some((_, age)) = load_endpoints_disk_cache_public(model) {
+        if let Some(endpoints) = self.load_endpoint_cache(model) {
+            if let Some((_, age)) = self.load_endpoint_cache_public(model) {
                 self.maybe_schedule_endpoint_refresh(
                     model,
                     Some(age),
@@ -2407,7 +2472,7 @@ impl OpenRouterProvider {
     }
 
     fn cached_endpoints_fingerprint(&self, model: &str) -> String {
-        if let Some(endpoints) = load_endpoints_disk_cache(model) {
+        if let Some(endpoints) = self.load_endpoint_cache(model) {
             return endpoints_fingerprint(&endpoints);
         }
         if let Ok(cache) = self.endpoints_cache.try_read()
@@ -2541,7 +2606,7 @@ impl OpenRouterProvider {
             self.api_base.clone(),
             self.auth.clone(),
             Arc::clone(&self.models_cache),
-            self.foreground_cache_namespace(),
+            self.cache_namespace(),
         )
         .await
     }
@@ -2553,7 +2618,7 @@ impl OpenRouterProvider {
             self.api_base.clone(),
             self.auth.clone(),
             Arc::clone(&self.models_cache),
-            self.foreground_cache_namespace(),
+            self.cache_namespace(),
         )
         .await
     }
@@ -2581,7 +2646,7 @@ impl OpenRouterProvider {
         }
 
         // Check disk cache
-        if let Some(endpoints) = load_endpoints_disk_cache(model) {
+        if let Some(endpoints) = self.load_endpoint_cache(model) {
             let mut cache = self.endpoints_cache.write().await;
             cache.insert(model.to_string(), (now, endpoints.clone()));
             return Ok(endpoints);
@@ -2621,7 +2686,7 @@ impl OpenRouterProvider {
         let endpoints = resp.data.endpoints;
 
         // Save to disk cache
-        save_endpoints_disk_cache(model, &endpoints);
+        self.save_endpoint_cache(model, &endpoints);
 
         // Update in-memory cache
         {
@@ -2674,7 +2739,7 @@ impl OpenRouterProvider {
             .context("Failed to parse endpoints response")?;
 
         let endpoints = resp.data.endpoints;
-        save_endpoints_disk_cache(model, &endpoints);
+        self.save_endpoint_cache(model, &endpoints);
 
         let mut cache = self.endpoints_cache.write().await;
         cache.insert(model.to_string(), (now, endpoints.clone()));
@@ -2752,7 +2817,7 @@ impl OpenRouterProvider {
         }
 
         // Check per-provider endpoint data (any provider supporting cache is enough)
-        let endpoints = load_endpoints_disk_cache(model_id).or_else(|| {
+        let endpoints = self.load_endpoint_cache(model_id).or_else(|| {
             self.endpoints_cache
                 .try_read()
                 .ok()?

@@ -78,11 +78,19 @@ fn create_visible_spawn_session(
 
     let mut session = Session::create(None, None);
     session.working_dir = Some(cwd.display().to_string());
+    let provider_key = provider_key_override
+        .map(str::to_string)
+        .or_else(|| provider_key_for_spawn_model(model_override, None));
+    let provider_key_ref = provider_key.as_deref();
     if let Some(model) = model_override {
-        session.model = Some(model.to_string());
+        session.model = Some(crate::provider::MultiProvider::canonical_session_model(
+            model,
+            provider_key_ref,
+            route_api_method_override,
+        ));
     }
-    if let Some(provider_key) = provider_key_override {
-        session.provider_key = Some(provider_key.to_string());
+    if let Some(provider_key) = provider_key {
+        session.provider_key = Some(provider_key);
     }
     if let Some(route_api_method) = route_api_method_override
         .map(str::trim)
@@ -90,6 +98,7 @@ fn create_visible_spawn_session(
     {
         session.route_api_method = Some(route_api_method.to_string());
     }
+    session.model_identity_format = Some(1);
     if let Some(effort) = effort_override.map(str::trim).filter(|e| !e.is_empty()) {
         // Persisted effort is restored (and validated against the resolved
         // provider/model) by `restore_reasoning_effort_from_session` when the

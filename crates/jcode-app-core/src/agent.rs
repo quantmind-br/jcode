@@ -363,9 +363,15 @@ impl Agent {
             tool_selection.disabled_tools,
         );
         agent.session.mark_active();
-        agent.session.model = Some(agent.provider.model());
-        agent.session.provider_key =
-            crate::session::derive_session_provider_key(agent.provider.name());
+        let metadata = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
+            agent.provider.model().as_str(),
+            agent.provider.name(),
+            None,
+        );
+        agent.session.model = Some(metadata.model);
+        agent.session.provider_key = metadata.provider_key;
+        agent.session.route_api_method = metadata.route_api_method;
+        agent.session.model_identity_format = Some(metadata.model_identity_format);
         agent.session.ensure_initial_session_context_message();
         agent.seed_compaction_from_session();
         agent.log_env_snapshot("create");
@@ -422,7 +428,16 @@ impl Agent {
                 ));
             }
         } else {
-            agent.session.model = Some(agent.provider.model());
+            let model = agent.provider.model();
+            let metadata = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
+                &model,
+                agent.provider.name(),
+                agent.session.provider_key.as_deref(),
+            );
+            agent.session.model = Some(metadata.model);
+            agent.session.provider_key = metadata.provider_key;
+            agent.session.route_api_method = metadata.route_api_method;
+            agent.session.model_identity_format = Some(metadata.model_identity_format);
         }
         agent.restore_reasoning_effort_from_session();
         agent.session.ensure_initial_session_context_message();

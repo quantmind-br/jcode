@@ -703,6 +703,41 @@ fn test_reports_sort_most_recently_used_first() {
 }
 
 #[test]
+fn test_usage_reports_with_same_display_name_keep_distinct_origins() {
+    let report = |origin: &str| ProviderUsage {
+        provider_name: "Same Gateway".to_string(),
+        extra_info: vec![
+            ("Model".to_string(), "same-model".to_string()),
+            ("Origin".to_string(), origin.to_string()),
+        ],
+        ..Default::default()
+    };
+
+    let mut results = Vec::new();
+    upsert_provider_usage(&mut results, report("named-profile:work"));
+    upsert_provider_usage(&mut results, report("named-profile:personal"));
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results.iter().map(provider_usage_key).collect::<Vec<_>>(),
+        vec![
+            "named-profile:personal".to_string(),
+            "named-profile:work".to_string()
+        ]
+    );
+}
+
+#[test]
+fn test_legacy_usage_report_without_origin_keeps_display_name_fallback() {
+    let report = ProviderUsage {
+        provider_name: "Legacy Gateway".to_string(),
+        ..Default::default()
+    };
+
+    assert_eq!(provider_usage_key(&report), "Legacy Gateway");
+}
+
+#[test]
 fn test_activity_sweeper_skips_sources_with_dedicated_reports() {
     // Dual-auth surfaces are always reported by their own fetchers.
     assert!(activity_source_has_dedicated_report(

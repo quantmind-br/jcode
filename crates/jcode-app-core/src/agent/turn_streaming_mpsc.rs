@@ -1004,7 +1004,16 @@ impl Agent {
                     "Provider switched model mid-request: '{}' -> '{}' (resyncing session/UI)",
                     model_at_request_start, model_after_stream
                 ));
-                self.session.model = Some(model_after_stream.clone());
+                let metadata =
+                    crate::provider::MultiProvider::session_route_metadata_from_model_switch(
+                        &model_after_stream,
+                        self.provider.name(),
+                        self.session.provider_key.as_deref(),
+                    );
+                self.session.model = Some(metadata.model);
+                self.session.provider_key = metadata.provider_key;
+                self.session.route_api_method = metadata.route_api_method;
+                self.session.model_identity_format = Some(metadata.model_identity_format);
                 self.provider_runtime_state.apply(
                     crate::provider::ProviderStateEvent::RuntimeModelObserved {
                         model: model_after_stream.clone(),

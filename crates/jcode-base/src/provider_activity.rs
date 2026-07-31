@@ -15,6 +15,8 @@
 //!   - `claude:oauth:<label>` / `claude:api-key`
 //!   - `openai:oauth:<label>` / `openai:api-key`
 //!   - `openai-compatible:<profile-id>` (DeepSeek, Moonshot, NVIDIA NIM, ...)
+//!   - `named-profile:<escaped-profile-name>` (configured `[providers.*]`
+//!     profiles; the escaped name contains no credential data)
 //!   - `openrouter`, `jcode`, `copilot`, `gemini`, `cursor`, `bedrock`,
 //!     `antigravity`, `azure-openai`
 
@@ -62,6 +64,20 @@ pub struct ProviderActivityStore {
     pub entries: HashMap<String, ProviderActivityEntry>,
 }
 
+/// Durable billing/source identity for the active session route.
+///
+/// The session's `provider_key` and `route_api_method` are the authoritative
+/// route metadata.  The display provider and process environment are not part
+/// of this type's resolution path; callers may use the old label/env helper
+/// only when this metadata is unavailable for a legacy session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteSourceIdentity {
+    pub source_key: String,
+    pub is_anthropic: bool,
+    pub is_openai: bool,
+    pub is_metered: bool,
+}
+
 struct CachedStore {
     loaded_at: Instant,
     store: ProviderActivityStore,
@@ -76,6 +92,9 @@ fn ledger_path() -> PathBuf {
 }
 
 fn load_store() -> ProviderActivityStore {
+    // Serde defaults keep the original ledger format readable. Do not merge
+    // legacy display-label keys into new profile keys: labels are not unique
+    // identities and such a merge could attribute spend to the wrong profile.
     crate::storage::read_json(&ledger_path()).unwrap_or_default()
 }
 
@@ -235,6 +254,9 @@ pub fn all_entries() -> Vec<(String, ProviderActivityEntry)> {
 /// `openai-compatible:deepseek` -> `DeepSeek (API key)`,
 /// `claude:oauth:claude-1` -> `Anthropic (Claude) [claude-1]`.
 pub fn display_name_for_source_key(source_key: &str) -> String {
+    if let Some(encoded_name) = source_key.strip_prefix("named-profile:") {
+        return format!("{} (API key)", decode_source_component(encoded_name));
+    }
     if let Some(profile_id) = source_key.strip_prefix("openai-compatible:") {
         let name = crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
             .map(|profile| profile.display_name.to_string())
@@ -276,6 +298,363 @@ pub fn display_name_for_source_key(source_key: &str) -> String {
     }
 }
 
+fn encode_source_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{:02X}", byte));
+        }
+    }
+    encoded
+}
+
+fn decode_source_component(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn named_profile_source_key(profile_name: &str) -> Option<String> {
+    let profile_name = profile_name.trim();
+    (!profile_name.is_empty())
+        .then(|| format!("named-profile:{}", encode_source_component(profile_name)))
+}
+
+fn runtime_source_key(runtime_provider: &str) -> Option<String> {
+    let runtime = runtime_provider.trim().to_ascii_lowercase();
+    if runtime.is_empty() {
+        return None;
+    }
+    match runtime.as_str() {
+        "jcode" | "openrouter" | "azure-openai" | "bedrock" | "copilot" | "gemini" | "cursor"
+        | "antigravity" => Some(runtime),
+        "claude" | "claude-oauth" => Some("claude:oauth:default".to_string()),
+        "claude-api" | "anthropic-api" => Some("claude:api-key".to_string()),
+        "openai" | "openai-oauth" => Some("openai:oauth:default".to_string()),
+        "openai-api" => Some("openai:api-key".to_string()),
+        "openai-compatible" => None,
+        other => crate::provider_catalog::openai_compatible_profile_by_id(other)
+            .map(|_| format!("openai-compatible:{other}")),
+    }
+}
+
+fn configured_named_profile_source_key(profile_name: &str) -> Option<String> {
+    let profile_name = profile_name.trim();
+    if profile_name.is_empty() {
+        return None;
+    }
+    crate::config::config()
+        .providers
+        .keys()
+        .find(|name| name.eq_ignore_ascii_case(profile_name))
+        .and_then(|name| named_profile_source_key(name))
+}
+
+fn route_component(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn route_provider_component(canonical_provider_model_identity: Option<&str>) -> Option<&str> {
+    let identity = canonical_provider_model_identity?.trim();
+    let (provider, _) = identity.split_once('/')?;
+    route_component(provider)
+}
+
+fn named_profile_source_key_for_route_component(component: &str) -> Option<String> {
+    let component = component.trim();
+    let component = component
+        .strip_prefix("openai-compatible:")
+        .map(str::trim)
+        .filter(|component| !component.is_empty())
+        .unwrap_or(component);
+    if component.is_empty() {
+        return None;
+    }
+    configured_named_profile_source_key(component).or_else(|| {
+        // A structured `openai-compatible:<id>` route can refer to a user
+        // profile that is not present in this process's config snapshot (for
+        // example, a remote session). Keep that identity distinct from native
+        // OpenAI and public OpenRouter rather than guessing from its label.
+        (crate::provider_catalog::openai_compatible_profile_by_id(component).is_none())
+            .then(|| named_profile_source_key(component))
+            .flatten()
+    })
+}
+
+fn route_provider_key_is_builtin(provider_key: &str) -> bool {
+    let provider_key = provider_key.trim();
+    let lower = provider_key.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "jcode"
+            | "jcode-subscription"
+            | "openrouter"
+            | "openai-compatible"
+            | "copilot"
+            | "gemini"
+            | "code-assist-oauth"
+            | "cursor"
+            | "bedrock"
+            | "antigravity"
+            | "https"
+            | "azure-openai"
+    ) || jcode_provider_core::AuthRoute::parse(provider_key).is_some()
+        || crate::provider_catalog::openai_compatible_profile_by_id(&lower).is_some()
+        || lower
+            .strip_prefix("openai-compatible:")
+            .is_some_and(|profile_id| {
+                crate::provider_catalog::openai_compatible_profile_by_id(profile_id).is_some()
+            })
+}
+
+fn route_source_identity_from_key(source_key: String) -> RouteSourceIdentity {
+    let is_anthropic = source_key == "claude:api-key" || source_key.starts_with("claude:oauth:");
+    let is_openai = source_key == "openai:api-key" || source_key.starts_with("openai:oauth:");
+    let is_metered = if let Some(profile_id) = source_key.strip_prefix("openai-compatible:") {
+        crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
+            .map(|profile| profile.requires_api_key)
+            .unwrap_or(true)
+    } else if let Some(encoded_name) = source_key.strip_prefix("named-profile:") {
+        let profile_name = decode_source_component(encoded_name);
+        crate::config::config()
+            .providers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&profile_name))
+            .map(|(_, profile)| {
+                profile.requires_api_key.unwrap_or(!matches!(
+                    profile.auth,
+                    crate::config::NamedProviderAuth::None
+                ))
+            })
+            .unwrap_or(true)
+    } else {
+        match source_key.as_str() {
+            "claude:api-key" | "openai:api-key" | "openrouter" | "bedrock" | "azure-openai" => true,
+            "jcode" | "copilot" | "gemini" | "cursor" | "antigravity" => false,
+            key if key.starts_with("claude:oauth:") || key.starts_with("openai:oauth:") => false,
+            // An explicit route unknown to this version is safer as a metered
+            // route than as a subscription route.  This branch is only reached
+            // after structured metadata identified a route.
+            _ => true,
+        }
+    };
+    RouteSourceIdentity {
+        source_key,
+        is_anthropic,
+        is_openai,
+        is_metered,
+    }
+}
+
+/// Resolve the ledger/pricing source from durable session route metadata.
+///
+/// `canonical_provider_model_identity` is the canonical `provider/model`
+/// session identity when available.  It is used as a tie-breaker for named
+/// profiles because the OpenRouter-compatible transport is shared by public
+/// OpenRouter, built-in compatible profiles, and user-defined profiles.
+///
+/// This function deliberately does not inspect `JCODE_NAMED_PROVIDER_PROFILE`,
+/// `JCODE_RUNTIME_PROVIDER`, cache namespaces, or display labels.  A `None`
+/// result means the caller is handling a legacy session without enough route
+/// metadata and may use its documented compatibility fallback.
+pub fn source_identity_for_route_metadata(
+    provider_key: Option<&str>,
+    route_api_method: Option<&str>,
+    canonical_provider_model_identity: Option<&str>,
+) -> Option<RouteSourceIdentity> {
+    let provider_key = provider_key.and_then(route_component);
+    let route_api_method = route_api_method.and_then(route_component);
+    let identity_provider = route_provider_component(canonical_provider_model_identity);
+
+    // A named profile must win over the shared OpenRouter transport. Check
+    // every durable identity spelling before interpreting transport tokens,
+    // but never override an explicit dual-auth route with a coincidentally
+    // named config profile such as `[providers.openai]`.
+    if route_api_method
+        .and_then(jcode_provider_core::AuthRoute::parse)
+        .is_none()
+    {
+        for component in [provider_key, identity_provider]
+            .into_iter()
+            .flatten()
+            .flat_map(|value| {
+                let profile_id = value
+                    .strip_prefix("openai-compatible:")
+                    .map(str::trim)
+                    .filter(|profile_id| !profile_id.is_empty());
+                [Some(value), profile_id]
+            })
+            .flatten()
+        {
+            if !route_provider_key_is_builtin(component)
+                && let Some(source_key) = configured_named_profile_source_key(component)
+            {
+                return Some(route_source_identity_from_key(source_key));
+            }
+        }
+    }
+
+    // `openrouter` is also the transport slot for named profiles. When a
+    // session has a non-built-in provider key, that durable key wins even if a
+    // legacy route method only describes the shared transport.
+    if let Some(provider_key) = provider_key
+        && !route_provider_key_is_builtin(provider_key)
+        && let Some(source_key) = named_profile_source_key_for_route_component(provider_key)
+    {
+        return Some(route_source_identity_from_key(source_key));
+    }
+
+    if let Some(identity_provider) = identity_provider
+        && !route_provider_key_is_builtin(identity_provider)
+        && let Some(source_key) = named_profile_source_key_for_route_component(identity_provider)
+    {
+        return Some(route_source_identity_from_key(source_key));
+    }
+
+    if let Some(method) = route_api_method
+        && let Some(profile_id) = method
+            .strip_prefix("openai-compatible:")
+            .map(str::trim)
+            .filter(|profile_id| !profile_id.is_empty())
+    {
+        if let Some(source_key) = named_profile_source_key_for_route_component(profile_id) {
+            return Some(route_source_identity_from_key(source_key));
+        }
+        return Some(route_source_identity_from_key(format!(
+            "openai-compatible:{profile_id}"
+        )));
+    }
+
+    // A bare compatible route still needs the provider key to distinguish a
+    // configured profile from the public OpenRouter slot.
+    if route_api_method == Some("openai-compatible") {
+        if let Some(provider_key) = provider_key {
+            if let Some(profile_id) = provider_key.strip_prefix("openai-compatible:") {
+                if let Some(source_key) = named_profile_source_key_for_route_component(profile_id) {
+                    return Some(route_source_identity_from_key(source_key));
+                }
+                return Some(route_source_identity_from_key(format!(
+                    "openai-compatible:{}",
+                    profile_id.trim()
+                )));
+            }
+            if let Some(source_key) = named_profile_source_key_for_route_component(provider_key) {
+                return Some(route_source_identity_from_key(source_key));
+            }
+        }
+    }
+
+    // Known OpenAI-compatible catalog profiles have their own pricing/ledger
+    // bucket even though their requests use the shared OpenRouter-capable
+    // transport. A provider-level switch can persist the bare profile id,
+    // while picker selections persist `openai-compatible:<id>`.
+    if route_api_method != Some("openrouter") {
+        if let Some(provider_key) = provider_key {
+            let profile_id = provider_key
+                .strip_prefix("openai-compatible:")
+                .map(str::trim)
+                .filter(|profile_id| !profile_id.is_empty())
+                .unwrap_or(provider_key);
+            if crate::provider_catalog::openai_compatible_profile_by_id(profile_id).is_some() {
+                return Some(route_source_identity_from_key(format!(
+                    "openai-compatible:{profile_id}"
+                )));
+            }
+        }
+    }
+
+    let auth_route = route_api_method.and_then(jcode_provider_core::AuthRoute::parse);
+    if let Some(route) = auth_route {
+        let source_key = match route {
+            jcode_provider_core::AuthRoute {
+                provider: jcode_provider_core::DualAuthProvider::Anthropic,
+                mode: jcode_provider_core::AuthMode::Oauth,
+            } => "claude:oauth:default",
+            jcode_provider_core::AuthRoute {
+                provider: jcode_provider_core::DualAuthProvider::Anthropic,
+                mode: jcode_provider_core::AuthMode::ApiKey,
+            } => "claude:api-key",
+            jcode_provider_core::AuthRoute {
+                provider: jcode_provider_core::DualAuthProvider::OpenAI,
+                mode: jcode_provider_core::AuthMode::Oauth,
+            } => "openai:oauth:default",
+            jcode_provider_core::AuthRoute {
+                provider: jcode_provider_core::DualAuthProvider::OpenAI,
+                mode: jcode_provider_core::AuthMode::ApiKey,
+            } => "openai:api-key",
+        };
+        return Some(route_source_identity_from_key(source_key.to_string()));
+    }
+
+    let method = route_api_method.map(str::to_ascii_lowercase);
+    let provider_key = provider_key.map(str::to_ascii_lowercase);
+    let identity_provider = identity_provider.map(str::to_ascii_lowercase);
+    let token = method
+        .as_deref()
+        .or(provider_key.as_deref())
+        .or(identity_provider.as_deref())?;
+
+    let source_key = match token {
+        "jcode" | "jcode-subscription" => "jcode".to_string(),
+        "openrouter" => "openrouter".to_string(),
+        "copilot" => "copilot".to_string(),
+        "gemini" | "code-assist-oauth" => "gemini".to_string(),
+        "cursor" => "cursor".to_string(),
+        "bedrock" => "bedrock".to_string(),
+        "antigravity" | "https" => "antigravity".to_string(),
+        "openai-compatible" => "openai-compatible:openai-compatible".to_string(),
+        "openai" | "openai-api" | "openai-api-key" => "openai:api-key".to_string(),
+        "openai-oauth" => "openai:oauth:default".to_string(),
+        "claude" | "anthropic" | "claude-api" | "anthropic-api" => "claude:api-key".to_string(),
+        "claude-oauth" => "claude:oauth:default".to_string(),
+        value if value.starts_with("openai-compatible:") => {
+            let profile_id = value.trim_start_matches("openai-compatible:").trim();
+            if profile_id.is_empty() {
+                return None;
+            }
+            format!("openai-compatible:{profile_id}")
+        }
+        _ => {
+            // An explicit provider key or canonical identity is enough to
+            // preserve an unknown named route.  Do not reinterpret a name
+            // containing "openai" as native OpenAI.
+            if let Some(source_key) = named_profile_source_key_for_route_component(token) {
+                source_key
+            } else {
+                return None;
+            }
+        }
+    };
+    Some(route_source_identity_from_key(source_key))
+}
+
 /// Human-readable relative age such as `just now`, `5m ago`, `3h ago`, `2d ago`.
 pub fn format_relative_age(unix_secs: u64) -> String {
     let secs = now_unix_secs().saturating_sub(unix_secs);
@@ -304,6 +683,38 @@ pub fn source_key_for_provider_label(label: &str, runtime_provider: Option<&str>
     let runtime = runtime_provider
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty());
+
+    if let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+        && let Some(source_key) = named_profile_source_key(&profile_name)
+    {
+        return source_key;
+    }
+
+    if let Some(runtime) = runtime.as_deref()
+        && let Some(source_key) = runtime_source_key(runtime)
+    {
+        return source_key;
+    }
+
+    if let Some(runtime) = runtime.as_deref()
+        && let Some(source_key) = configured_named_profile_source_key(runtime)
+    {
+        return source_key;
+    }
+
+    if runtime.as_deref() == Some("openai-compatible")
+        && let Ok(namespace) = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
+    {
+        let namespace = namespace.trim();
+        if !namespace.is_empty() {
+            if crate::provider_catalog::openai_compatible_profile_by_id(namespace).is_some() {
+                return format!("openai-compatible:{}", namespace.to_ascii_lowercase());
+            }
+            if let Some(source_key) = named_profile_source_key(namespace) {
+                return source_key;
+            }
+        }
+    }
 
     // OpenRouter first: the catalog also carries an `openrouter` compatible
     // profile, but the ledger treats the public aggregator as its own bucket.
@@ -444,6 +855,8 @@ mod tests {
 
     #[test]
     fn source_key_mapping_covers_known_providers() {
+        let _env_lock = lock_env();
+        let _profile = EnvVarGuard::set("JCODE_NAMED_PROVIDER_PROFILE", "");
         assert_eq!(
             source_key_for_provider_label("DeepSeek", None),
             "openai-compatible:deepseek"
@@ -471,6 +884,144 @@ mod tests {
         assert_eq!(
             source_key_for_provider_label("Some Custom Endpoint", None),
             "some-custom-endpoint"
+        );
+    }
+
+    #[test]
+    fn route_metadata_source_identity_ignores_ambient_profile_and_display_name() {
+        let _env_lock = lock_env();
+        let _profile = EnvVarGuard::set("JCODE_NAMED_PROVIDER_PROFILE", "openai-proxy");
+        let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "openai");
+        let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "openrouter");
+
+        let source = source_identity_for_route_metadata(
+            Some("openai-proxy"),
+            Some("openai-compatible:openai-proxy"),
+            Some("openai-proxy/gpt-5.4"),
+        )
+        .expect("named route metadata should resolve");
+        assert_eq!(source.source_key, "named-profile:openai-proxy");
+        assert!(
+            !source.is_openai,
+            "a custom profile must not become native OpenAI"
+        );
+        assert!(source.is_metered);
+
+        let source = source_identity_for_route_metadata(
+            Some("openrouter"),
+            Some("openrouter"),
+            Some("openrouter/openai/gpt-5.4@OpenAI"),
+        )
+        .expect("OpenRouter route metadata should resolve");
+        assert_eq!(source.source_key, "openrouter");
+        assert!(source.is_metered);
+
+        let source = source_identity_for_route_metadata(
+            Some("openai-proxy"),
+            Some("openrouter"),
+            Some("openai-proxy/gpt-5.4"),
+        )
+        .expect("named profile on shared transport should resolve");
+        assert_eq!(source.source_key, "named-profile:openai-proxy");
+        assert!(!source.is_openai);
+    }
+
+    #[test]
+    fn route_metadata_source_identity_tracks_a_to_b_transition() {
+        let _env_lock = lock_env();
+        let _profile = EnvVarGuard::set("JCODE_NAMED_PROVIDER_PROFILE", "route-a");
+        let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "route-a");
+
+        let route_a = source_identity_for_route_metadata(
+            Some("route-a"),
+            Some("openai-compatible:route-a"),
+            Some("route-a/shared-model"),
+        )
+        .expect("route A should resolve");
+        let route_b = source_identity_for_route_metadata(
+            Some("route-b"),
+            Some("openai-compatible:route-b"),
+            Some("route-b/shared-model"),
+        )
+        .expect("route B should resolve");
+
+        assert_eq!(route_a.source_key, "named-profile:route-a");
+        assert_eq!(route_b.source_key, "named-profile:route-b");
+        assert_ne!(route_a.source_key, route_b.source_key);
+    }
+
+    #[test]
+    fn named_profiles_with_same_display_label_get_distinct_source_keys() {
+        let _env_lock = lock_env();
+        let first = EnvVarGuard::set("JCODE_NAMED_PROVIDER_PROFILE", "work gateway");
+        assert_eq!(
+            source_key_for_provider_label("Same Gateway", Some("openai-compatible")),
+            "named-profile:work%20gateway"
+        );
+        drop(first);
+
+        let _second = EnvVarGuard::set("JCODE_NAMED_PROVIDER_PROFILE", "personal gateway");
+        assert_eq!(
+            source_key_for_provider_label("Same Gateway", Some("openai-compatible")),
+            "named-profile:personal%20gateway"
+        );
+    }
+
+    #[test]
+    fn named_profiles_keep_spend_in_separate_ledger_entries() {
+        let _env_lock = lock_env();
+        clear_ledger_cache();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
+
+        let _work = EnvVarGuard::set("JCODE_NAMED_PROVIDER_PROFILE", "work");
+        let work_key = source_key_for_provider_label("Same Gateway", Some("openai-compatible"));
+        record_spend(&work_key, 1.25);
+
+        let _personal = EnvVarGuard::set("JCODE_NAMED_PROVIDER_PROFILE", "personal");
+        let personal_key = source_key_for_provider_label("Same Gateway", Some("openai-compatible"));
+        record_spend(&personal_key, 2.50);
+
+        assert_ne!(work_key, personal_key);
+        assert_eq!(
+            spend_snapshot(&work_key).expect("work spend").all_time_usd,
+            1.25
+        );
+        assert_eq!(
+            spend_snapshot(&personal_key)
+                .expect("personal spend")
+                .all_time_usd,
+            2.50
+        );
+        let entries = all_entries();
+        assert!(entries.iter().any(|(key, _)| key == &work_key));
+        assert!(entries.iter().any(|(key, _)| key == &personal_key));
+    }
+
+    #[test]
+    fn legacy_ledger_entry_still_parses_without_origin_metadata() {
+        let value = serde_json::json!({
+            "entries": {
+                "openrouter": {
+                    "last_used_unix_secs": 123,
+                    "spend": {
+                        "day_date": "2026-07-31",
+                        "day_usd": 1.25,
+                        "month": "2026-07",
+                        "month_usd": 2.50,
+                        "all_time_usd": 3.75
+                    }
+                }
+            }
+        });
+        let store: ProviderActivityStore = serde_json::from_value(value).expect("legacy ledger");
+        assert_eq!(store.entries["openrouter"].last_used_unix_secs, Some(123));
+        assert_eq!(
+            store.entries["openrouter"]
+                .spend
+                .as_ref()
+                .map(|spend| spend.all_time_usd),
+            Some(3.75)
         );
     }
 

@@ -1,5 +1,5 @@
 use super::pricing::{cheapness_for_route, openrouter_pricing_from_model_pricing};
-use super::{ModelRoute, RouteCostConfidence, RouteCostSource, provider_for_model};
+use super::{ModelRoute, RouteCostConfidence, RouteCostSource};
 use std::collections::BTreeSet;
 
 pub fn is_listable_model_name(model: &str) -> bool {
@@ -99,11 +99,42 @@ pub fn openrouter_catalog_model_id(model: &str) -> Option<String> {
         return None;
     }
 
-    match provider_for_model(trimmed) {
-        Some("claude") => Some(format!("anthropic/{}", trimmed)),
-        Some("openai") => Some(format!("openai/{}", trimmed)),
-        Some("openrouter") => Some(trimmed.to_string()),
-        _ => None,
+    // Only the curated native ids may be rewritten.  Prefix heuristics such as
+    // `gpt-*`/`claude-*` are valid for standalone provider detection, but are
+    // not enough to prove that an opaque id from a named compatible profile is
+    // an OpenAI/Anthropic model.  A slash-qualified value is already an
+    // explicit OpenRouter catalog id and is preserved byte-for-byte.
+    if crate::provider::bedrock::BedrockProvider::is_bedrock_model_id(trimmed) {
+        return None;
+    }
+    if trimmed.contains('/') || trimmed.contains('@') {
+        return Some(trimmed.to_string());
+    }
+    if jcode_provider_core::model_id::matches_known_model(trimmed, super::ALL_CLAUDE_MODELS) {
+        return Some(format!("anthropic/{}", trimmed));
+    }
+    if jcode_provider_core::model_id::matches_known_model(trimmed, super::ALL_OPENAI_MODELS) {
+        return Some(format!("openai/{}", trimmed));
+    }
+    None
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::openrouter_catalog_model_id;
+
+    #[test]
+    fn custom_gpt_and_claude_ids_are_not_rewritten_as_native_openrouter_models() {
+        assert_eq!(
+            openrouter_catalog_model_id("gpt-custom/v1"),
+            Some("gpt-custom/v1".to_string())
+        );
+        assert_eq!(
+            openrouter_catalog_model_id("claude-custom/model"),
+            Some("claude-custom/model".to_string())
+        );
+        assert_eq!(openrouter_catalog_model_id("gpt-5.4-proxy"), None);
+        assert_eq!(openrouter_catalog_model_id("claude-sonnet-custom"), None);
     }
 }
 

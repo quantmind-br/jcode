@@ -42,6 +42,14 @@ pub struct DefaultModelSelection {
     pub provider_key: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRouteMetadata {
+    pub model: String,
+    pub provider_key: Option<String>,
+    pub route_api_method: Option<String>,
+    pub model_identity_format: u8,
+}
+
 impl MultiProvider {
     pub(super) fn auto_default_provider(availability: ProviderAvailability) -> ActiveProvider {
         jcode_provider_core::auto_default_provider(availability)
@@ -230,6 +238,222 @@ impl MultiProvider {
         provider_key.trim()
     }
 
+    /// Return the provider identity used on the left side of a persisted
+    /// `provider/model` session value.
+    ///
+    /// This intentionally folds credential aliases (`openai-api-key`,
+    /// `claude-oauth`, ...) back to their provider family. Credential and API
+    /// method precision belongs in `provider_key` and `route_api_method`; the
+    /// model value itself must remain a stable provider/model identity.
+    fn canonical_session_model_provider(
+        provider_key: Option<&str>,
+        route_api_method: Option<&str>,
+    ) -> Option<String> {
+        if let Some(api_method) = route_api_method
+            .map(str::trim)
+            .filter(|api_method| !api_method.is_empty())
+        {
+            let provider = match ModelRouteApiMethod::parse(api_method) {
+                ModelRouteApiMethod::JcodeSubscription => Some("jcode".to_string()),
+                ModelRouteApiMethod::ClaudeOAuth | ModelRouteApiMethod::AnthropicApiKey => {
+                    Some("claude".to_string())
+                }
+                ModelRouteApiMethod::OpenAIOAuth | ModelRouteApiMethod::OpenAIApiKey => {
+                    Some("openai".to_string())
+                }
+                ModelRouteApiMethod::OpenRouter => Some("openrouter".to_string()),
+                ModelRouteApiMethod::OpenAiCompatible {
+                    profile_id: Some(profile_id),
+                } => Some(profile_id),
+                ModelRouteApiMethod::Copilot => Some("copilot".to_string()),
+                ModelRouteApiMethod::Cursor => Some("cursor".to_string()),
+                ModelRouteApiMethod::Bedrock => Some("bedrock".to_string()),
+                ModelRouteApiMethod::CodeAssistOAuth => Some("gemini".to_string()),
+                ModelRouteApiMethod::AntigravityHttps => Some("antigravity".to_string()),
+                ModelRouteApiMethod::OpenAiCompatible { profile_id: None }
+                | ModelRouteApiMethod::RemoteCatalog
+                | ModelRouteApiMethod::Current
+                | ModelRouteApiMethod::Other(_) => None,
+            };
+            if provider.is_some() {
+                return provider;
+            }
+        }
+
+        let provider_key = provider_key
+            .map(str::trim)
+            .filter(|provider_key| !provider_key.is_empty())?;
+        if let Some(route) = jcode_provider_core::AuthRoute::parse(provider_key) {
+            return Some(Self::provider_key(route.active_provider()).to_string());
+        }
+        if let Some(provider) = jcode_provider_core::parse_provider_hint(provider_key) {
+            return Some(Self::provider_key(provider).to_string());
+        }
+        if let Some(profile) =
+            crate::provider_catalog::resolve_openai_compatible_profile_selection(provider_key)
+        {
+            return Some(profile.id.to_string());
+        }
+        if let Some((prefix, profile_id)) = provider_key.split_once(':')
+            && prefix.eq_ignore_ascii_case("openai-compatible")
+            && !profile_id.trim().is_empty()
+        {
+            return Some(profile_id.trim().to_string());
+        }
+        crate::config::config()
+            .providers
+            .keys()
+            .find(|name| name.eq_ignore_ascii_case(provider_key))
+            .cloned()
+            .or_else(|| {
+                // Imported/external sessions can carry a stable provider key
+                // that is not configured as a live MultiProvider route here.
+                Some(provider_key.to_string())
+            })
+    }
+
+    /// Canonicalize the model identity stored in a session.
+    ///
+    /// Bare and legacy colon forms are accepted on input. The returned value
+    /// uses exactly one structural slash: the first slash separates the
+    /// provider identity and every later slash belongs to the provider-local
+    /// model id. Historical OpenRouter native ids are kept opaque under the
+    /// `openrouter/` session provider namespace, while credential prefixes are
+    /// never persisted.
+    pub fn canonical_session_model(
+        model: &str,
+        provider_key: Option<&str>,
+        route_api_method: Option<&str>,
+    ) -> String {
+        Self::canonical_session_model_with_identity_format(
+            model,
+            provider_key,
+            route_api_method,
+            None,
+        )
+    }
+
+    /// Canonicalize a persisted session model with the session identity marker
+    /// available. Format 1 identities already have the outer provider
+    /// namespace, including one-segment opaque OpenRouter ids. A missing
+    /// marker deliberately keeps the historical interpretation.
+    pub fn canonical_session_model_with_identity_format(
+        model: &str,
+        provider_key: Option<&str>,
+        route_api_method: Option<&str>,
+        model_identity_format: Option<u8>,
+    ) -> String {
+        let model = model.trim();
+        if model.is_empty() {
+            return String::new();
+        }
+
+        let Some(provider) = Self::canonical_session_model_provider(provider_key, route_api_method)
+        else {
+            // A model that is already qualified is useful to imported/external
+            // session sources even when their provider is not a MultiProvider
+            // route. Do not invent a namespace for those sessions.
+            return model.to_string();
+        };
+
+        let parsed = jcode_provider_core::parse_model_spec(model);
+        match parsed.separator {
+            Some(jcode_provider_core::ModelSpecSeparator::LegacyColon) => {
+                format!("{provider}/{}", parsed.model)
+            }
+            Some(jcode_provider_core::ModelSpecSeparator::Slash) => {
+                let parsed_provider = parsed.provider.as_deref().unwrap_or_default();
+                if parsed_provider.eq_ignore_ascii_case(&provider) {
+                    if provider == "openrouter" {
+                        if model_identity_format == Some(1) {
+                            // Format 1 stores the provider namespace outside
+                            // the opaque OpenRouter id. Unlike historical
+                            // native ids, a one-segment id such as
+                            // `openrouter/custom-model` is already complete.
+                            return model.to_string();
+                        }
+                        // OpenRouter native model ids already contain a
+                        // vendor namespace (`vendor/model`). Store that opaque
+                        // id under the provider namespace. Once the outer
+                        // namespace is present, the remainder also contains a
+                        // slash and the representation is already canonical.
+                        if parsed.model.contains('/') {
+                            model.to_string()
+                        } else {
+                            format!("{provider}/{model}")
+                        }
+                    } else {
+                        format!("{provider}/{}", parsed.model)
+                    }
+                } else {
+                    // A slash in a provider-local model id is opaque. This is
+                    // particularly important for OpenRouter's historical
+                    // `vendor/model` ids and named gateways serving path-like
+                    // model names.
+                    format!("{provider}/{model}")
+                }
+            }
+            None => format!("{provider}/{model}"),
+        }
+    }
+
+    pub fn canonical_session_model_from_identity(
+        identity: &jcode_provider_core::CanonicalModelIdentity,
+    ) -> String {
+        identity.serialized()
+    }
+
+    /// Update all persisted route identity fields from one structured route.
+    pub fn session_route_metadata_from_selection(
+        selection: &RouteSelection,
+    ) -> SessionRouteMetadata {
+        SessionRouteMetadata {
+            model: selection.canonical_session_model(),
+            provider_key: Some(selection.runtime_key.stable_id()),
+            route_api_method: Some(selection.api_method.clone()),
+            model_identity_format: 1,
+        }
+    }
+
+    /// Update persisted model/provider route metadata after a provider-level
+    /// switch. Provider-only switches intentionally clear the prior API method
+    /// so stale route precision cannot re-pin a different provider on restore.
+    pub fn session_route_metadata_from_model_switch(
+        model_request: &str,
+        active_provider: &str,
+        previous_provider_key: Option<&str>,
+    ) -> SessionRouteMetadata {
+        let provider_key = Self::session_provider_key_after_model_switch(
+            model_request,
+            active_provider,
+            previous_provider_key,
+        );
+        let model = Self::canonical_session_model(model_request, provider_key.as_deref(), None);
+        SessionRouteMetadata {
+            model,
+            provider_key,
+            route_api_method: None,
+            model_identity_format: 1,
+        }
+    }
+
+    fn canonical_model_provider_from_spec(model: &str) -> Option<String> {
+        let parsed = jcode_provider_core::parse_model_spec(model);
+        if parsed.separator != Some(jcode_provider_core::ModelSpecSeparator::Slash) {
+            return None;
+        }
+        let provider = parsed.provider.as_deref()?;
+        Self::canonical_session_model_provider(Some(provider), None)
+    }
+
+    fn session_provider_key_matches_model_provider(
+        provider_key: &str,
+        model_provider: &str,
+    ) -> bool {
+        Self::canonical_session_model_provider(Some(provider_key), None)
+            .is_some_and(|provider| provider.eq_ignore_ascii_case(model_provider))
+    }
+
     fn explicit_session_provider_key_for_model_request(model_request: &str) -> Option<String> {
         let model_request = model_request.trim();
         if let Some((prefix, rest)) = model_request.split_once(':') {
@@ -262,6 +486,10 @@ impl MultiProvider {
             return Some("openrouter".to_string());
         }
 
+        if let Some(provider) = Self::canonical_model_provider_from_spec(model_request) {
+            return Some(provider);
+        }
+
         None
     }
 
@@ -284,6 +512,23 @@ impl MultiProvider {
         provider_name: &str,
         previous_provider_key: Option<&str>,
     ) -> Option<String> {
+        // A canonical provider/model value does not carry credential mode. If
+        // the previous route belongs to that provider, retain its precise
+        // credential key and leave the API method as the second authority.
+        if let Some(model_provider) = Self::canonical_model_provider_from_spec(model_request) {
+            if let Some(previous_provider_key) = previous_provider_key
+                .map(str::trim)
+                .filter(|provider_key| !provider_key.is_empty())
+                && Self::session_provider_key_matches_model_provider(
+                    previous_provider_key,
+                    &model_provider,
+                )
+            {
+                return Some(previous_provider_key.to_string());
+            }
+            return Some(model_provider);
+        }
+
         if let Some(provider_key) =
             Self::explicit_session_provider_key_for_model_request(model_request)
         {
@@ -361,6 +606,34 @@ impl MultiProvider {
             return model.to_string();
         }
 
+        if let Some(model_provider) = Self::canonical_model_provider_from_spec(model) {
+            let dispatch_model =
+                Self::canonical_model_remainder_for_route(model, Some(&model_provider), None, None);
+            if let Some(route) = provider_key
+                .map(str::trim)
+                .filter(|provider_key| !provider_key.is_empty())
+                .and_then(jcode_provider_core::AuthRoute::parse_explicit_credential_prefix)
+            {
+                return format!("{}:{dispatch_model}", route.model_prefix());
+            }
+            if provider_key.is_none_or(|provider_key| {
+                Self::session_provider_key_matches_model_provider(provider_key, &model_provider)
+            }) {
+                return model.to_string();
+            }
+
+            // A legacy OpenRouter native model may contain a provider/model
+            // path but have `provider_key = openrouter`. Keep that model id
+            // opaque when it has not yet been rewritten to the canonical
+            // `openrouter/<native-id>` session form.
+            if provider_key.is_some_and(|provider_key| {
+                Self::canonical_session_model_provider(Some(provider_key), None).as_deref()
+                    == Some("openrouter")
+            }) {
+                return format!("openrouter:{model}");
+            }
+        }
+
         if let Some((prefix, rest)) = model.split_once(':') {
             let prefix = prefix.trim();
             if !prefix.is_empty()
@@ -433,28 +706,64 @@ impl MultiProvider {
         provider_key: Option<&str>,
         route_api_method: Option<&str>,
     ) -> String {
+        Self::model_switch_request_for_session_route_with_identity_format(
+            model,
+            provider_key,
+            route_api_method,
+            None,
+        )
+    }
+
+    /// Restore a session route while honoring the persisted model identity
+    /// format. Format 1 OpenRouter identities have already consumed the outer
+    /// provider namespace; legacy sessions intentionally retain their old
+    /// native-id parsing.
+    pub fn model_switch_request_for_session_route_with_identity_format(
+        model: &str,
+        provider_key: Option<&str>,
+        route_api_method: Option<&str>,
+        model_identity_format: Option<u8>,
+    ) -> String {
         let model = model.trim();
         if model.is_empty() {
             return String::new();
         }
+        let dispatch_model = Self::canonical_model_remainder_for_route(
+            model,
+            provider_key,
+            route_api_method,
+            model_identity_format,
+        );
         if let Some(api_method) = route_api_method
             .map(str::trim)
             .filter(|api_method| !api_method.is_empty())
         {
             match ModelRouteApiMethod::parse(api_method) {
-                ModelRouteApiMethod::JcodeSubscription => return model.to_string(),
-                ModelRouteApiMethod::ClaudeOAuth => return format!("claude-oauth:{model}"),
-                ModelRouteApiMethod::AnthropicApiKey => return format!("claude-api:{model}"),
-                ModelRouteApiMethod::OpenAIOAuth => return format!("openai-oauth:{model}"),
-                ModelRouteApiMethod::OpenAIApiKey => return format!("openai-api:{model}"),
-                ModelRouteApiMethod::OpenRouter => return format!("openrouter:{model}"),
+                ModelRouteApiMethod::JcodeSubscription => return dispatch_model,
+                ModelRouteApiMethod::ClaudeOAuth => {
+                    return format!("claude-oauth:{dispatch_model}");
+                }
+                ModelRouteApiMethod::AnthropicApiKey => {
+                    return format!("claude-api:{dispatch_model}");
+                }
+                ModelRouteApiMethod::OpenAIOAuth => {
+                    return format!("openai-oauth:{dispatch_model}");
+                }
+                ModelRouteApiMethod::OpenAIApiKey => {
+                    return format!("openai-api:{dispatch_model}");
+                }
+                ModelRouteApiMethod::OpenRouter => {
+                    return format!("openrouter:{dispatch_model}");
+                }
                 ModelRouteApiMethod::OpenAiCompatible {
                     profile_id: Some(profile_id),
-                } => return format!("{profile_id}:{model}"),
-                ModelRouteApiMethod::Copilot => return format!("copilot:{model}"),
-                ModelRouteApiMethod::Cursor => return format!("cursor:{model}"),
-                ModelRouteApiMethod::Bedrock => return format!("bedrock:{model}"),
-                ModelRouteApiMethod::AntigravityHttps => return format!("antigravity:{model}"),
+                } => return format!("{profile_id}:{dispatch_model}"),
+                ModelRouteApiMethod::Copilot => return format!("copilot:{dispatch_model}"),
+                ModelRouteApiMethod::Cursor => return format!("cursor:{dispatch_model}"),
+                ModelRouteApiMethod::Bedrock => return format!("bedrock:{dispatch_model}"),
+                ModelRouteApiMethod::AntigravityHttps => {
+                    return format!("antigravity:{dispatch_model}");
+                }
                 ModelRouteApiMethod::OpenAiCompatible { profile_id: None }
                 | ModelRouteApiMethod::CodeAssistOAuth
                 | ModelRouteApiMethod::RemoteCatalog
@@ -464,6 +773,39 @@ impl MultiProvider {
         }
 
         Self::model_switch_request_for_session_model(model, provider_key)
+    }
+
+    fn canonical_model_remainder_for_route(
+        model: &str,
+        provider_key: Option<&str>,
+        route_api_method: Option<&str>,
+        model_identity_format: Option<u8>,
+    ) -> String {
+        let parsed = jcode_provider_core::parse_model_spec(model);
+        let Some(parsed_provider) = parsed.provider.as_deref() else {
+            return model.trim().to_string();
+        };
+        let Some(route_provider) =
+            Self::canonical_session_model_provider(provider_key, route_api_method)
+        else {
+            return model.trim().to_string();
+        };
+        if parsed_provider.eq_ignore_ascii_case(&route_provider) {
+            if route_provider == "openrouter" && model_identity_format == Some(1) {
+                return parsed.model;
+            }
+            if route_provider == "openrouter" && !parsed.model.contains('/') {
+                // Legacy OpenRouter native ids such as `openrouter/owl-alpha`
+                // already contain the native vendor namespace. Canonical
+                // session ids add an outer provider namespace and therefore
+                // have a slash in the parsed remainder.
+                model.trim().to_string()
+            } else {
+                parsed.model
+            }
+        } else {
+            model.trim().to_string()
+        }
     }
 
     pub(super) fn resolve_config_provider_selection(
@@ -852,6 +1194,134 @@ mod tests {
             openrouter_openai.provider_key.as_deref(),
             Some("openrouter")
         );
+    }
+
+    #[test]
+    fn canonical_session_model_uses_provider_slash_and_preserves_native_paths() {
+        assert_eq!(
+            MultiProvider::canonical_session_model(
+                "gpt-5.6-sol",
+                Some("openai-api"),
+                Some("openai-api-key"),
+            ),
+            "openai/gpt-5.6-sol"
+        );
+        assert_eq!(
+            MultiProvider::canonical_session_model(
+                "vendor/model/with/slashes",
+                Some("sol-gateway"),
+                Some("openai-compatible:sol-gateway"),
+            ),
+            "sol-gateway/vendor/model/with/slashes"
+        );
+        assert_eq!(
+            MultiProvider::canonical_session_model(
+                "openrouter/owl-alpha",
+                Some("openrouter"),
+                Some("openrouter"),
+            ),
+            "openrouter/openrouter/owl-alpha"
+        );
+        assert_eq!(
+            MultiProvider::model_switch_request_for_session_route(
+                "openrouter/openrouter/owl-alpha",
+                Some("openrouter"),
+                Some("openrouter"),
+            ),
+            "openrouter:openrouter/owl-alpha"
+        );
+    }
+
+    #[test]
+    fn format_one_openrouter_identity_preserves_opaque_one_segment_models() {
+        for model in [
+            "openrouter/custom-model",
+            "openrouter/openai/gpt-5.4@OpenAI",
+        ] {
+            assert_eq!(
+                MultiProvider::canonical_session_model_with_identity_format(
+                    model,
+                    Some("openrouter"),
+                    Some("openrouter"),
+                    Some(1),
+                ),
+                model
+            );
+        }
+
+        assert_eq!(
+            MultiProvider::model_switch_request_for_session_route_with_identity_format(
+                "openrouter/custom-model",
+                Some("openrouter"),
+                Some("openrouter"),
+                Some(1),
+            ),
+            "openrouter:custom-model"
+        );
+        assert_eq!(
+            MultiProvider::model_switch_request_for_session_route_with_identity_format(
+                "openrouter/openai/gpt-5.4@OpenAI",
+                Some("openrouter"),
+                Some("openrouter"),
+                Some(1),
+            ),
+            "openrouter:openai/gpt-5.4@OpenAI"
+        );
+    }
+
+    #[test]
+    fn missing_openrouter_identity_marker_keeps_legacy_native_model_parsing() {
+        assert_eq!(
+            MultiProvider::canonical_session_model(
+                "openrouter/owl-alpha",
+                Some("openrouter"),
+                Some("openrouter"),
+            ),
+            "openrouter/openrouter/owl-alpha"
+        );
+        assert_eq!(
+            MultiProvider::model_switch_request_for_session_route(
+                "openrouter/owl-alpha",
+                Some("openrouter"),
+                Some("openrouter"),
+            ),
+            "openrouter:openrouter/owl-alpha"
+        );
+    }
+
+    #[test]
+    fn structured_route_identity_uses_runtime_profile_not_display_label() {
+        let openai = RouteSelection::from_model_route(&ModelRoute {
+            model: "gpt-5.4".to_string(),
+            provider: "OpenRouter".to_string(),
+            api_method: "openai-oauth".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        });
+        let openrouter = RouteSelection::from_model_route(&ModelRoute {
+            model: "openai/gpt-5.4".to_string(),
+            provider: "OpenRouter".to_string(),
+            api_method: "openrouter".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        });
+        assert_eq!(openai.canonical_session_model(), "openai/gpt-5.4");
+        assert_eq!(
+            openrouter.canonical_session_model(),
+            "openrouter/openai/gpt-5.4"
+        );
+
+        let named = RouteSelection::from_model_route(&ModelRoute {
+            model: "gpt-5.6-sol".to_string(),
+            provider: "Solar Panel".to_string(),
+            api_method: "openai-compatible:solarpanel".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        });
+        assert_eq!(named.canonical_session_model(), "solarpanel/gpt-5.6-sol");
     }
 
     #[test]

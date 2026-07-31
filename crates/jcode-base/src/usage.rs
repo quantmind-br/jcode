@@ -46,7 +46,8 @@ const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(900);
 const PROVIDER_USAGE_CACHE_TTL: Duration = Duration::from_secs(120);
 
 /// Cached provider usage reports (used by /usage command).
-/// Keyed by provider display name.
+/// Keyed by the stable source identity carried in the report's `Origin` detail
+/// line. Older reports without that detail fall back to their display name.
 static PROVIDER_USAGE_CACHE: std::sync::OnceLock<
     std::sync::Mutex<HashMap<String, (Instant, ProviderUsage)>>,
 > = std::sync::OnceLock::new();
@@ -227,7 +228,7 @@ where
         map.clear();
         let now = Instant::now();
         for r in &results {
-            map.insert(r.provider_name.clone(), (now, r.clone()));
+            map.insert(provider_usage_key(r), (now, r.clone()));
         }
     }
 
@@ -243,9 +244,10 @@ where
 }
 
 fn upsert_provider_usage(results: &mut Vec<ProviderUsage>, report: ProviderUsage) {
+    let report_source_key = provider_usage_key(&report);
     if let Some(existing) = results
         .iter_mut()
-        .find(|existing| existing.provider_name == report.provider_name)
+        .find(|existing| provider_usage_key(existing) == report_source_key)
     {
         *existing = report;
     } else {
@@ -260,13 +262,29 @@ fn sort_reports_most_recent_first(results: &mut [ProviderUsage]) {
     results.sort_by(|a, b| {
         b.last_used_unix_secs
             .cmp(&a.last_used_unix_secs)
+            .then_with(|| provider_usage_key(a).cmp(&provider_usage_key(b)))
             .then_with(|| a.provider_name.cmp(&b.provider_name))
     });
+}
+
+/// Stable report identity, with a compatibility fallback for legacy reports
+/// that predate the origin detail line.
+fn provider_usage_key(report: &ProviderUsage) -> String {
+    report
+        .extra_info
+        .iter()
+        .find(|(key, value)| key == "Origin" && !value.trim().is_empty())
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| report.provider_name.clone())
 }
 
 /// Stamp a report with last-used recency from the activity ledger: sets the
 /// sort key and appends a human-readable "Last used" detail line.
 fn attach_activity(report: &mut ProviderUsage, source_key: &str) {
+    report.extra_info.retain(|(key, _)| key != "Origin");
+    report
+        .extra_info
+        .insert(0, ("Origin".to_string(), source_key.to_string()));
     if let Some(used) = crate::provider_activity::last_used_unix_secs(source_key) {
         report.last_used_unix_secs = Some(used);
         report.extra_info.push((

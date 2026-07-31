@@ -538,6 +538,97 @@ pub struct Config {
     pub launch_hotkeys: LaunchHotkeysConfig,
 }
 
+/// Return the durable global spelling for a model selected through a concrete
+/// provider/profile.
+///
+/// New global defaults use `provider/model`, but the older credential-colon
+/// forms remain opaque here. A slash-bearing value is already qualified only
+/// when its prefix matches the supplied provider; otherwise it is a provider-
+/// local model id and receives the supplied provider prefix. OpenRouter is the
+/// one exception because its native model ids intentionally use vendor/model
+/// paths (and may carry an `@` provider pin).
+pub fn qualify_default_model(model: &str, provider: Option<&str>) -> String {
+    let model = model.trim();
+    if model.is_empty() {
+        return String::new();
+    }
+
+    let Some(provider) = provider
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"))
+    else {
+        return model.to_string();
+    };
+
+    let parsed = jcode_provider_core::parse_model_spec(model);
+    if parsed.separator == Some(jcode_provider_core::ModelSpecSeparator::LegacyColon) {
+        // Credential/profile-colon forms are an established runtime vocabulary,
+        // not global canonical ids. Preserve them byte-for-byte.
+        return model.to_string();
+    }
+
+    let provider = canonical_provider_identity(provider);
+    if parsed.separator == Some(jcode_provider_core::ModelSpecSeparator::Slash) {
+        let model_provider = parsed.provider.as_deref().unwrap_or_default();
+        if model_provider == provider
+            || (provider.eq_ignore_ascii_case("openrouter")
+                && jcode_provider_core::core_provider_for_model(model) == Some("openrouter"))
+        {
+            return model.to_string();
+        }
+        return jcode_provider_core::format_provider_model(&provider, model);
+    }
+
+    jcode_provider_core::format_provider_model(&provider, model)
+}
+
+/// Canonical provider identity used on the left side of a persisted
+/// `provider/model` value. Credential aliases remain valid in
+/// `default_provider`, where they carry auth-mode information.
+pub fn canonical_provider_identity(provider: &str) -> String {
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return String::new();
+    }
+    if let Some(profile) =
+        crate::provider_catalog::resolve_openai_compatible_profile_selection(provider)
+    {
+        return profile.id.to_string();
+    }
+    if let Some(active) = jcode_provider_core::parse_provider_hint(provider) {
+        return jcode_provider_core::provider_key(active).to_string();
+    }
+    if let Some(route) = jcode_provider_core::AuthRoute::parse(provider) {
+        return jcode_provider_core::provider_key(route.active_provider()).to_string();
+    }
+    provider.to_string()
+}
+
+/// Keep a named provider's `default_model` provider-local.
+///
+/// Config authors may use the global spelling (`profile/model`) in a named
+/// profile section, but the runtime must receive only `model`. A mismatched
+/// prefix is left untouched for backwards compatibility; it is still an
+/// opaque provider-native id rather than something this compatibility layer
+/// should reinterpret.
+pub fn normalize_named_provider_default_model(profile: &str, model: &str) -> String {
+    let model = model.trim();
+    if model.is_empty() {
+        return String::new();
+    }
+
+    let parsed = jcode_provider_core::parse_model_spec(model);
+    if parsed
+        .provider
+        .as_deref()
+        .is_some_and(|provider| provider == profile.trim())
+    {
+        parsed.model
+    } else {
+        model.to_string()
+    }
+}
+
 /// Agent Client Protocol adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

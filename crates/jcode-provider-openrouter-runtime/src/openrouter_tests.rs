@@ -250,7 +250,7 @@ fn openai_compatible_models_endpoint_reads_llamacpp_meta_n_ctx() {
 }
 
 #[test]
-fn named_openai_compatible_provider_sets_catalog_cache_namespace() {
+fn named_openai_compatible_provider_has_instance_local_catalog_namespace() {
     let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let _key = EnvVarGuard::set("TEST_NAMED_COMPAT_KEY", "test-key");
@@ -267,8 +267,59 @@ fn named_openai_compatible_provider_sets_catalog_cache_namespace() {
         .expect("named profile should initialize");
 
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").as_deref(),
-        Ok("example-compat")
+        _provider.foreground_cache_namespace().as_deref(),
+        Some("example-compat")
+    );
+}
+
+#[test]
+fn routing_enabled_named_profiles_keep_profile_runtime_identity() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let model = "vendor/shared-model";
+    let make_profile = || jcode_base::config::NamedProviderConfig {
+        base_url: "https://llm.example.com/v1".to_string(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        model_catalog: false,
+        provider_routing: true,
+        default_model: Some(model.to_string()),
+        models: vec![jcode_base::config::NamedProviderModelConfig {
+            id: model.to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let first = OpenRouterProvider::new_named_openai_compatible("route-first", &make_profile())
+        .expect("first routing profile");
+    let second = OpenRouterProvider::new_named_openai_compatible("route-second", &make_profile())
+        .expect("second routing profile");
+
+    assert!(first.supports_provider_routing_features());
+    assert!(second.supports_provider_routing_features());
+    let first_route = first
+        .model_routes()
+        .into_iter()
+        .next()
+        .expect("first route");
+    let second_route = second
+        .model_routes()
+        .into_iter()
+        .next()
+        .expect("second route");
+    assert_eq!(first_route.api_method, "openai-compatible:route-first");
+    assert_eq!(second_route.api_method, "openai-compatible:route-second");
+    assert_eq!(
+        first_route.canonical_model_identity().provider,
+        "route-first"
+    );
+    assert_eq!(
+        second_route.canonical_model_identity().provider,
+        "route-second"
+    );
+    assert_ne!(
+        first_route.canonical_model_identity(),
+        second_route.canonical_model_identity()
     );
 }
 
@@ -861,6 +912,47 @@ fn test_configured_api_base_rejects_insecure_http_remote() {
 }
 
 #[test]
+fn public_openrouter_stays_aggregator_when_provider_features_are_disabled() {
+    let _lock = ENV_LOCK.lock();
+    let temp = TempDir::new().expect("create temp home");
+    let jcode_home = temp.path().join("jcode-home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", &jcode_home);
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _env = isolate_openrouter_autodetect_env();
+    let _key = EnvVarGuard::set("OPENROUTER_API_KEY", "openrouter-test-key");
+    let _base = EnvVarGuard::set("JCODE_OPENROUTER_API_BASE", "https://openrouter.ai/api/v1/");
+    let _features = EnvVarGuard::set("JCODE_OPENROUTER_PROVIDER_FEATURES", "0");
+
+    let provider = OpenRouterProvider::new().expect("build public OpenRouter runtime");
+    assert_eq!(provider.profile_id, None);
+    assert!(!provider.supports_provider_features);
+    assert_eq!(provider.runtime_display_name(), "OpenRouter");
+    assert_eq!(provider.direct_openai_compatible_route_parts(), None);
+}
+
+#[test]
+fn openrouter_metadata_profile_cannot_create_compatible_runtime_identity() {
+    let _lock = ENV_LOCK.lock();
+    let temp = TempDir::new().expect("create temp home");
+    let jcode_home = temp.path().join("jcode-home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", &jcode_home);
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _env = isolate_openrouter_autodetect_env();
+    let _key = EnvVarGuard::set("OPENROUTER_API_KEY", "openrouter-test-key");
+
+    let provider = OpenRouterProvider::new_openai_compatible_profile_runtime(
+        jcode_base::provider_catalog::OPENROUTER_OPENAI_COMPAT_PROFILE,
+    )
+    .expect("public OpenRouter metadata profile should use the real runtime");
+
+    assert_eq!(provider.profile_id, None);
+    assert!(provider.supports_provider_features);
+    assert_eq!(provider.direct_openai_compatible_route_parts(), None);
+}
+
+#[test]
 fn autodetects_single_saved_openai_compatible_profile() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
@@ -1016,7 +1108,7 @@ fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
 }
 
 #[test]
-fn autodetected_profile_seeds_default_model_and_cache_namespace() {
+fn autodetected_profile_seeds_default_model_and_instance_namespace() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
@@ -1031,12 +1123,7 @@ fn autodetected_profile_seeds_default_model_and_cache_namespace() {
 
     let provider = OpenRouterProvider::new().expect("provider");
     assert_eq!(provider.model.blocking_read().clone(), "glm-4.5");
-    assert_eq!(
-        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
-            .ok()
-            .as_deref(),
-        Some("zai")
-    );
+    assert_eq!(provider.cache_namespace(), "zai");
 }
 
 #[test]
@@ -1284,6 +1371,11 @@ fn openrouter_with_openrouter_profile_id_exposes_unified_reasoning_effort() {
         .set_reasoning_effort("high")
         .expect("OpenRouter with doctor profile id should accept effort");
     assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+    assert_eq!(
+        provider.direct_openai_compatible_route_parts(),
+        None,
+        "the public OpenRouter runtime must not become a direct compatible route when its metadata profile id is present"
+    );
 }
 
 #[test]
@@ -2305,6 +2397,12 @@ fn runtime_display_name_for_profile_runtime_instance() {
     .expect("build nvidia-nim runtime");
     assert_eq!(nim.runtime_display_name(), "NVIDIA NIM");
     assert_eq!(Provider::name(&nim), "openrouter");
+    assert_eq!(nim.profile_id.as_deref(), Some("nvidia-nim"));
+    assert_eq!(
+        nim.direct_openai_compatible_route_parts()
+            .map(|(_, api_method, _)| api_method),
+        Some("openai-compatible:nvidia-nim".to_string())
+    );
 }
 
 #[test]

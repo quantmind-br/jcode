@@ -18,6 +18,10 @@ pub(super) struct SessionJournalMeta {
     pub(super) provider_key: Option<String>,
     pub(super) model: Option<String>,
     #[serde(default)]
+    pub(super) route_api_method: Option<String>,
+    #[serde(default)]
+    pub(super) model_identity_format: Option<u8>,
+    #[serde(default)]
     pub(super) reasoning_effort: Option<String>,
     pub(super) subagent_model: Option<String>,
     pub(super) improve_mode: Option<SessionImproveMode>,
@@ -78,6 +82,8 @@ pub(super) fn metadata_requires_snapshot(
         || prev.title != current.title
         || prev.custom_title != current.custom_title
         || prev.provider_key != current.provider_key
+        || prev.route_api_method != current.route_api_method
+        || prev.model_identity_format != current.model_identity_format
         || prev.reasoning_effort != current.reasoning_effort
         || prev.subagent_model != current.subagent_model
         || prev.improve_mode != current.improve_mode

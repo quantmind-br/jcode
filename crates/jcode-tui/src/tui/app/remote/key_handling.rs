@@ -1134,7 +1134,26 @@ async fn handle_remote_key_internal(
                         return Ok(());
                     }
                     app.upstream_provider = None;
-                    remote.set_model(model_name).await?;
+                    match app_mod::model_context::resolve_typed_model_command(app, model_name) {
+                        app_mod::model_context::TypedModelCommandResolution::Canonical(spec) => {
+                            remote.set_model(&spec).await?;
+                        }
+                        app_mod::model_context::TypedModelCommandResolution::Ambiguous(
+                            candidates,
+                        ) => {
+                            app.push_display_message(DisplayMessage::error(
+                                app_mod::model_context::ambiguous_model_message(
+                                    model_name,
+                                    &candidates,
+                                ),
+                            ));
+                            app.set_status_notice("Ambiguous model");
+                            return Ok(());
+                        }
+                        app_mod::model_context::TypedModelCommandResolution::PassThrough => {
+                            remote.set_model(model_name).await?;
+                        }
+                    }
                     app.remote_model_switch_in_flight = true;
                     return Ok(());
                 }

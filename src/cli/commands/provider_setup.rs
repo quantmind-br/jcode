@@ -93,7 +93,6 @@ pub(crate) fn configure_provider_profile(
     options: ProviderAddOptions,
 ) -> Result<ProviderSetupReport> {
     let name = validate_profile_name(&options.name)?;
-    ensure_profile_name_not_reserved(&name)?;
 
     let api_base = normalize_api_base(&options.base_url).ok_or_else(|| {
         anyhow::anyhow!(
@@ -101,7 +100,7 @@ pub(crate) fn configure_provider_profile(
             options.base_url
         )
     })?;
-    let model = options.model.trim().to_string();
+    let model = crate::config::normalize_named_provider_default_model(&name, &options.model);
     if model.is_empty() {
         anyhow::bail!("--model cannot be empty");
     }
@@ -192,12 +191,29 @@ pub(crate) fn configure_provider_profile(
             config_path.display()
         )
     })?;
-    if existing.providers.contains_key(&name) && !options.overwrite {
-        anyhow::bail!(
-            "Provider profile '{}' already exists. Re-run with --overwrite to replace it.",
-            name
-        );
+    if let Some(existing_name) = existing
+        .providers
+        .keys()
+        .find(|existing_name| existing_name.eq_ignore_ascii_case(&name))
+    {
+        if existing_name != &name {
+            anyhow::bail!(
+                "Provider profile '{}' duplicates existing profile '{}' case-insensitively.",
+                name,
+                existing_name
+            );
+        }
+        if !options.overwrite {
+            anyhow::bail!(
+                "Provider profile '{}' already exists. Re-run with --overwrite to replace it.",
+                name
+            );
+        }
+    } else {
+        ensure_profile_name_not_reserved(&name)?;
     }
+
+    let global_model = crate::config::qualify_default_model(&model, Some(&name));
 
     let mut updated = if options.overwrite {
         remove_named_provider_sections(&content, &name)
@@ -205,7 +221,7 @@ pub(crate) fn configure_provider_profile(
         content
     };
     if options.set_default {
-        updated = upsert_provider_defaults(updated, &name, &model);
+        updated = upsert_provider_defaults(updated, &name, &global_model);
     }
     updated = append_profile_section(updated, &name, &profile);
 
@@ -232,7 +248,7 @@ pub(crate) fn configure_provider_profile(
         profile: name.clone(),
         config_path: path_to_string(config_path),
         api_base,
-        model: model.clone(),
+        model: global_model.clone(),
         api_key_env,
         env_file,
         env_file_path,
@@ -285,21 +301,28 @@ fn validate_profile_name(raw: &str) -> Result<String> {
 }
 
 fn ensure_profile_name_not_reserved(name: &str) -> Result<()> {
-    const RESERVED_PROVIDER_NAMES: &[&str] = &[
-        "auto",
-        "claude-subprocess",
-        "compat",
-        "custom",
-        "azure-openai",
-        "aoai",
-    ];
-    if resolve_login_provider(name).is_some()
-        || RESERVED_PROVIDER_NAMES
+    if let Some(provider) = resolve_login_provider(name) {
+        anyhow::bail!(
+            "Provider profile '{}' collides with built-in provider id or alias '{}' (canonical id '{}'). Choose a non-reserved profile name such as '{}-api'.",
+            name,
+            name,
+            provider.id,
+            name
+        );
+    }
+    // These aliases belong to the CLI provider vocabulary but do not represent
+    // login descriptors, so they are kept as the small compatibility tail
+    // outside the shared metadata table.
+    let explicit_model_prefix = format!("{}:model", name.to_ascii_lowercase());
+    if crate::provider::AuthRoute::parse(name).is_some()
+        || crate::provider::explicit_model_provider_prefix(&explicit_model_prefix).is_some()
+        || ["auto", "claude-subprocess"]
             .iter()
             .any(|reserved| name.eq_ignore_ascii_case(reserved))
     {
         anyhow::bail!(
-            "'{}' is a built-in provider id or alias. Choose a non-reserved profile name such as '{}-api'.",
+            "Provider profile '{}' collides with built-in provider id or alias '{}'. Choose a non-reserved profile name such as '{}-api'.",
+            name,
             name,
             name
         );
@@ -678,13 +701,16 @@ mod tests {
         let config = std::fs::read_to_string(&config_path).expect("read config");
         assert!(config.contains("# keep this comment"));
         assert!(config.contains("default_provider = \"my-api\""));
-        assert!(config.contains("default_model = \"model-a\""));
+        assert!(config.contains("default_model = \"my-api/model-a\""));
         assert!(config.contains("[providers.my-api]"));
         assert!(!config.contains("secret-test-key"));
 
         let parsed: Config = toml::from_str(&config).expect("valid config");
         assert_eq!(parsed.provider.default_provider.as_deref(), Some("my-api"));
-        assert_eq!(parsed.provider.default_model.as_deref(), Some("model-a"));
+        assert_eq!(
+            parsed.provider.default_model.as_deref(),
+            Some("my-api/model-a")
+        );
         let profile = parsed.providers.get("my-api").expect("profile");
         assert_eq!(profile.base_url, "https://llm.example.com/v1");
         assert_eq!(profile.default_model.as_deref(), Some("model-a"));
@@ -731,5 +757,93 @@ mod tests {
         let config = std::fs::read_to_string(temp.path().join("config.toml")).expect("config");
         assert!(config.contains("auth = \"none\""));
         assert!(config.contains("requires_api_key = false"));
+    }
+
+    #[test]
+    fn provider_add_rejects_builtin_ids_and_aliases_case_insensitively() {
+        let _lock = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+
+        for name in [
+            "OpenAI",
+            "z-ai",
+            "bailian",
+            "AUTO",
+            "claude-subprocess",
+            "api-key",
+            "openai-oauth",
+        ] {
+            let mut options = base_options();
+            options.name = name.to_string();
+            let err = configure_provider_profile(options).expect_err("reserved name");
+            let message = err.to_string();
+            assert!(
+                message.to_ascii_lowercase().contains("collid")
+                    || message.to_ascii_lowercase().contains("built-in"),
+                "unexpected collision error for {name}: {message}"
+            );
+            assert!(
+                message.contains(name),
+                "error should name collision: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_add_rejects_case_variant_of_existing_custom_profile() {
+        let _lock = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "[providers.my-api]\nbase_url = \"http://localhost:8000/v1\"\n",
+        )
+        .expect("write existing profile");
+
+        let mut options = base_options();
+        options.name = "MY-API".to_string();
+        options.base_url = "http://localhost:8001/v1".to_string();
+        options.api_key = None;
+        options.no_api_key = true;
+        let err = configure_provider_profile(options).expect_err("case variant duplicate");
+        assert!(err.to_string().contains("case-insensitively"));
+        assert!(err.to_string().contains("my-api"));
+    }
+
+    #[test]
+    fn provider_add_strips_only_matching_profile_prefix_from_local_model() {
+        let _lock = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+
+        let mut options = base_options();
+        options.model = "my-api/local-model".to_string();
+        let report = configure_provider_profile(options).expect("configure provider");
+        assert_eq!(report.model, "my-api/local-model");
+
+        let config = Config::load();
+        let profile = config.providers.get("my-api").expect("profile");
+        assert_eq!(profile.default_model.as_deref(), Some("local-model"));
+        assert_eq!(profile.models[0].id, "local-model");
+    }
+
+    #[test]
+    fn provider_add_preserves_mismatched_slash_model_as_opaque_local_id() {
+        let _lock = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+
+        let mut options = base_options();
+        options.model = "vendor/remote-model".to_string();
+        configure_provider_profile(options).expect("configure provider");
+
+        let config = Config::load();
+        let profile = config.providers.get("my-api").expect("profile");
+        assert_eq!(
+            profile.default_model.as_deref(),
+            Some("vendor/remote-model")
+        );
+        assert_eq!(profile.models[0].id, "vendor/remote-model");
     }
 }

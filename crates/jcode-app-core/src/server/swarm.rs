@@ -1556,6 +1556,7 @@ pub(super) async fn run_swarm_task(
     // instead of silently falling back to the config default on persistence.
     session.provider_key = provider_key;
     session.route_api_method = route;
+    session.model_identity_format = Some(1);
     if let Some(dir) = working_dir {
         session.working_dir = Some(dir.display().to_string());
     }

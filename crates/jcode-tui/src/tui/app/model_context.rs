@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) mod model_route_metadata;
+
 /// Reroute target offered after a provider guardrail/refusal stop. Guardrail
 /// refusals are model-side policy stops, so retrying the same model rarely
 /// helps; hopping to the strongest Anthropic route often does.
@@ -28,15 +30,6 @@ impl App {
 
     /// Shared post-switch bookkeeping for every local model/provider switch
     /// path (/model, model cycling, failover, post-login activation).
-    ///
-    /// Centralized so all paths agree on what a switch means: reset provider
-    /// session ids, drop upstream/status details, invalidate the model picker
-    /// cache, update the context limit, recompute the session provider key,
-    /// and persist the session. Returns the active model after the switch.
-    ///
-    /// `model_request` is the original request string (it may carry an
-    /// explicit provider prefix like `openrouter:`); for provider-level
-    /// switches without a model request, pass the active model name.
     pub(super) fn finalize_model_switch(&mut self, model_request: &str) -> String {
         self.provider_session_id = None;
         self.session.provider_session_id = None;
@@ -45,14 +38,42 @@ impl App {
         self.invalidate_model_picker_cache();
         let active_model = self.provider.model();
         self.update_context_limit_for_model(&active_model);
-        self.session.provider_key =
-            crate::provider::MultiProvider::session_provider_key_after_model_switch(
-                model_request,
-                self.provider.name(),
-                self.session.provider_key.as_deref(),
-            );
-        self.session.model = Some(active_model.clone());
-        let _ = self.session.save();
+        let meta = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
+            model_request,
+            self.provider.name(),
+            self.session.provider_key.as_deref(),
+        );
+        model_route_metadata::apply_session_route_metadata(
+            self,
+            meta.model,
+            meta.provider_key,
+            meta.route_api_method,
+            meta.model_identity_format,
+        );
+        active_model
+    }
+
+    /// Persist a structured route selection produced by the model picker or a
+    /// fallback offer, keeping the exact provider/model/API-method identity.
+    pub(super) fn finalize_model_switch_from_selection(
+        &mut self,
+        selection: &crate::provider::RouteSelection,
+    ) -> String {
+        self.provider_session_id = None;
+        self.session.provider_session_id = None;
+        self.upstream_provider = None;
+        self.status_detail = None;
+        self.invalidate_model_picker_cache();
+        let active_model = self.provider.model();
+        self.update_context_limit_for_model(&active_model);
+        let meta = crate::provider::MultiProvider::session_route_metadata_from_selection(selection);
+        model_route_metadata::apply_session_route_metadata(
+            self,
+            meta.model,
+            meta.provider_key,
+            meta.route_api_method,
+            meta.model_identity_format,
+        );
         active_model
     }
 
@@ -466,10 +487,9 @@ impl App {
         if self.is_remote {
             self.upstream_provider = None;
             self.status_detail = None;
-            // Track the method we are switching to so subsequent fallback picks
-            // know the active credential path (remote sessions have no other
-            // client-side route bookkeeping).
-            self.session.route_api_method = Some(offer.selection.api_method.clone());
+            // Keep the chosen route selection around until the server confirms
+            // the switch so session metadata can be applied atomically.
+            self.remote_model_switch_route_selection = Some(offer.selection.clone());
             self.pending_route_selection = Some(offer.selection);
             self.pending_fallback_resend = offer.remote_resend;
             self.push_display_message(DisplayMessage::system(format!(
@@ -482,23 +502,7 @@ impl App {
 
         match self.provider.set_route_selection(&offer.selection) {
             Ok(()) => {
-                let spec = offer.selection.routed_model_spec();
-                self.provider_session_id = None;
-                self.session.provider_session_id = None;
-                self.upstream_provider = None;
-                self.status_detail = None;
-                self.invalidate_model_picker_cache();
-                let active_model = self.provider.model();
-                self.update_context_limit_for_model(&active_model);
-                self.session.provider_key =
-                    crate::provider::MultiProvider::session_provider_key_after_model_switch(
-                        &spec,
-                        self.provider.name(),
-                        self.session.provider_key.as_deref(),
-                    );
-                self.session.model = Some(active_model.clone());
-                self.session.route_api_method = Some(offer.selection.api_method.clone());
-                let _ = self.session.save();
+                let active_model = self.finalize_model_switch_from_selection(&offer.selection);
                 self.push_display_message(DisplayMessage::system(format!(
                     "↪ Switched to {} and resending (was {}).",
                     offer.target_label, offer.from_label,
@@ -1468,31 +1472,71 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
     if let Some(model_name) = trimmed.strip_prefix("/model ") {
         app.record_keybinding_slow(crate::tui::app::shortcut_hints::LearnableAction::ModelSwitch);
         let model_name = model_name.trim();
-        match app.provider.set_model(model_name) {
-            Ok(()) => {
-                let active_model = app.finalize_model_switch(model_name);
-                let auth_suffix = app
-                    .provider
-                    .active_auth_method_label()
-                    .map(|method| format!(" (via {})", method))
-                    .unwrap_or_default();
-                app.push_display_message(DisplayMessage {
-                    role: "system".to_string(),
-                    content: format!("✓ Switched to model: {}{}", active_model, auth_suffix),
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: None,
-                    tool_data: None,
-                });
-                app.set_status_notice(format!("Model → {}", model_name));
-            }
-            Err(e) => {
-                app.push_display_message(DisplayMessage::error(model_switch_failure_message(
-                    &e.to_string(),
-                    app.is_remote,
+        if model_name.is_empty() {
+            app.push_display_message(DisplayMessage::error("Usage: /model <name>".to_string()));
+            app.set_status_notice("Model switch failed");
+            return true;
+        }
+        match resolve_typed_model_command(app, model_name) {
+            TypedModelCommandResolution::Canonical(spec) => match app.provider.set_model(&spec) {
+                Ok(()) => {
+                    let active_model = app.finalize_model_switch(&spec);
+                    let auth_suffix = app
+                        .provider
+                        .active_auth_method_label()
+                        .map(|method| format!(" (via {})", method))
+                        .unwrap_or_default();
+                    app.push_display_message(DisplayMessage {
+                        role: "system".to_string(),
+                        content: format!("✓ Switched to model: {}{}", active_model, auth_suffix),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                    app.set_status_notice(format!("Model → {}", active_model));
+                }
+                Err(e) => {
+                    app.push_display_message(DisplayMessage::error(model_switch_failure_message(
+                        &e.to_string(),
+                        app.is_remote,
+                    )));
+                    app.set_status_notice("Model switch failed");
+                }
+            },
+            TypedModelCommandResolution::Ambiguous(candidates) => {
+                app.push_display_message(DisplayMessage::error(ambiguous_model_message(
+                    model_name,
+                    &candidates,
                 )));
-                app.set_status_notice("Model switch failed");
+                app.set_status_notice("Ambiguous model");
             }
+            TypedModelCommandResolution::PassThrough => match app.provider.set_model(model_name) {
+                Ok(()) => {
+                    let active_model = app.finalize_model_switch(model_name);
+                    let auth_suffix = app
+                        .provider
+                        .active_auth_method_label()
+                        .map(|method| format!(" (via {})", method))
+                        .unwrap_or_default();
+                    app.push_display_message(DisplayMessage {
+                        role: "system".to_string(),
+                        content: format!("✓ Switched to model: {}{}", active_model, auth_suffix),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                    app.set_status_notice(format!("Model → {}", model_name));
+                }
+                Err(e) => {
+                    app.push_display_message(DisplayMessage::error(model_switch_failure_message(
+                        &e.to_string(),
+                        app.is_remote,
+                    )));
+                    app.set_status_notice("Model switch failed");
+                }
+            },
         }
         return true;
     }
@@ -1941,5 +1985,99 @@ pub(super) fn unavailable_model_route_message(
         );
     }
 
+    lines.join("\n")
+}
+
+/// Resolution result for a typed `/model <name>` command.
+pub(super) enum TypedModelCommandResolution {
+    Canonical(String),
+    Ambiguous(Vec<String>),
+    PassThrough,
+}
+
+/// Resolve a bare typed model name to a canonical provider/model identity when
+/// it is unambiguous; otherwise fall back to normal parsing or report
+/// candidates.
+pub(super) fn resolve_typed_model_command(
+    app: &crate::tui::app::App,
+    model_name: &str,
+) -> TypedModelCommandResolution {
+    if model_name.is_empty() {
+        return TypedModelCommandResolution::PassThrough;
+    }
+    // Qualified specs (`provider/model`, `profile:model`, `openai-oauth:model`)
+    // carry their own provider identity; let the provider/session parse them.
+    if model_name.contains('/') || model_name.contains(':') {
+        return TypedModelCommandResolution::PassThrough;
+    }
+
+    let routes: Vec<crate::provider::ModelRoute> = if app.is_remote {
+        app.remote_model_options.clone()
+    } else {
+        app.provider.model_routes()
+    };
+    if routes.is_empty() {
+        return TypedModelCommandResolution::PassThrough;
+    }
+
+    let mut by_provider: std::collections::BTreeMap<String, Vec<crate::provider::ModelRoute>> =
+        std::collections::BTreeMap::new();
+    for route in routes {
+        if route.model.eq_ignore_ascii_case(model_name) {
+            let identity = route.canonical_model_identity();
+            by_provider
+                .entry(identity.provider)
+                .or_default()
+                .push(route);
+        }
+    }
+    if by_provider.is_empty() {
+        return TypedModelCommandResolution::PassThrough;
+    }
+
+    fn choose_representative_route<'a>(
+        group: &'a [crate::provider::ModelRoute],
+    ) -> Option<&'a crate::provider::ModelRoute> {
+        group.iter().find(|r| r.available).or_else(|| group.first())
+    }
+
+    if by_provider.len() > 1 {
+        let candidates: Vec<String> = by_provider
+            .values()
+            .filter_map(|group| {
+                choose_representative_route(group)
+                    .map(|route| route.canonical_model_identity().serialized())
+            })
+            .collect();
+        return TypedModelCommandResolution::Ambiguous(candidates);
+    }
+
+    let group = by_provider.into_values().next().unwrap_or_default();
+    if let Some(route) = choose_representative_route(&group) {
+        TypedModelCommandResolution::Canonical(route.canonical_model_identity().serialized())
+    } else {
+        TypedModelCommandResolution::PassThrough
+    }
+}
+
+pub(super) fn ambiguous_model_message(model_name: &str, candidates: &[String]) -> String {
+    let mut lines = vec![
+        format!(
+            "Ambiguous model `{}` matches multiple providers:",
+            model_name
+        ),
+        String::new(),
+    ];
+    for spec in candidates {
+        lines.push(format!("  • {}", spec));
+    }
+    lines.extend([
+        String::new(),
+        "Use a qualified form to pick the source you want:".to_string(),
+        format!("  /model <provider>/{model_name}"),
+        format!("  /model <provider>:{model_name}"),
+        String::new(),
+        "Or run /model to open the picker and choose visually.".to_string(),
+    ]);
     lines.join("\n")
 }

@@ -1031,6 +1031,39 @@ mod tests {
         }
     }
 
+    struct SolarpanelProvider;
+
+    #[async_trait]
+    impl Provider for SolarpanelProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            Err(anyhow::anyhow!(
+                "Solarpanel provider should not be used for streaming completions in ui header tests"
+            ))
+        }
+
+        fn name(&self) -> &str {
+            "solarpanel"
+        }
+
+        fn display_name(&self) -> String {
+            "Solarpanel".to_string()
+        }
+
+        fn model(&self) -> String {
+            "gpt-5.6-sol".to_string()
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(SolarpanelProvider)
+        }
+    }
+
     fn ensure_test_jcode_home_if_unset() {
         static TEST_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
 
@@ -1047,9 +1080,13 @@ mod tests {
     }
 
     fn create_test_app() -> crate::tui::app::App {
+        create_test_app_with_provider(MockProvider)
+    }
+
+    fn create_test_app_with_provider(provider: impl Provider + 'static) -> crate::tui::app::App {
         ensure_test_jcode_home_if_unset();
 
-        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let provider: Arc<dyn Provider> = Arc::new(provider);
         let rt = tokio::runtime::Runtime::new().expect("test runtime");
         let registry = rt.block_on(Registry::new(provider.clone()));
         crate::tui::app::App::new_for_test_harness(provider, registry)
@@ -1664,7 +1701,7 @@ mod tests {
             .join("\n");
 
         assert!(
-            rendered.contains("anthropic(oauth)"),
+            rendered.contains("anthropic(oauth*+key)"),
             "rendered: {rendered}"
         );
         assert!(rendered.contains("openai(key)"), "rendered: {rendered}");
@@ -1753,6 +1790,24 @@ mod tests {
         assert_eq!(
             format_model_name("claude-opus-4-6", "OpenRouter"),
             "Claude Opus"
+        );
+    }
+
+    #[test]
+    fn header_model_line_includes_provider_identity_for_named_profile() {
+        // A model like gpt-5.6-sol reachable through both OpenAI and a named
+        // OpenAI-compatible profile must show the active provider in the
+        // persistent header so the user cannot confuse the source.
+        let app = create_test_app_with_provider(SolarpanelProvider);
+        let rendered = rendered_header_lines(&app, 80).join(" ");
+
+        assert!(
+            rendered.contains("solarpanel"),
+            "provider label should be visible in the header model line: {rendered}"
+        );
+        assert!(
+            rendered.contains("GPT-5.6 Sol") || rendered.contains("gpt-5.6-sol"),
+            "model name should be visible in the header model line: {rendered}"
         );
     }
 }

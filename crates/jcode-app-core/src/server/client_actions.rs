@@ -663,6 +663,12 @@ fn clone_split_session(parent_session_id: &str) -> anyhow::Result<(String, Strin
     child.compaction = parent.compaction.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
+    child.provider_key = parent.provider_key.clone();
+    child.route_api_method = parent.route_api_method.clone();
+    child.model_identity_format = parent.model_identity_format;
+    if child.model_identity_format.is_none() {
+        child.model_identity_format = Some(1);
+    }
     child.status = crate::session::SessionStatus::Closed;
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of
@@ -699,6 +705,10 @@ fn create_transfer_child_session(
     child.model = parent.model.clone();
     child.provider_key = parent.provider_key.clone();
     child.route_api_method = parent.route_api_method.clone();
+    child.model_identity_format = parent.model_identity_format;
+    if child.model_identity_format.is_none() {
+        child.model_identity_format = Some(1);
+    }
     child.subagent_model = parent.subagent_model.clone();
     child.improve_mode = parent.improve_mode;
     child.autoreview_enabled = parent.autoreview_enabled;

@@ -89,7 +89,7 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) debug_socket: bool,
 
-    /// Model to use (e.g., claude-opus-4-6, gpt-5.5)
+    /// Model to use. Prefer the canonical provider/model form (e.g. claude/claude-opus-4-6 or openai/gpt-5.5); legacy bare and provider-colon forms remain accepted.
     #[arg(short, long, global = true)]
     pub(crate) model: Option<String>,
 

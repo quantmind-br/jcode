@@ -155,9 +155,16 @@ impl Agent {
 
         let mut new_session = Session::create(None, None);
         new_session.mark_active();
-        new_session.model = Some(self.provider.model());
-        new_session.provider_key =
-            crate::session::derive_session_provider_key(self.provider.name());
+        let model = self.provider.model();
+        let metadata = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
+            &model,
+            self.provider.name(),
+            None,
+        );
+        new_session.model = Some(metadata.model);
+        new_session.provider_key = metadata.provider_key;
+        new_session.route_api_method = metadata.route_api_method;
+        new_session.model_identity_format = Some(metadata.model_identity_format);
         new_session.is_canary = preserve_canary;
         new_session.testing_build = preserve_testing_build;
         new_session.is_debug = preserve_debug;
@@ -603,7 +610,16 @@ impl Agent {
                 ));
             }
         } else {
-            self.session.model = Some(self.provider.model());
+            let model = self.provider.model();
+            let metadata = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
+                &model,
+                self.provider.name(),
+                self.session.provider_key.as_deref(),
+            );
+            self.session.model = Some(metadata.model);
+            self.session.provider_key = metadata.provider_key;
+            self.session.route_api_method = metadata.route_api_method;
+            self.session.model_identity_format = Some(metadata.model_identity_format);
         }
         self.restore_reasoning_effort_from_session();
         let model_ms = model_start.elapsed().as_millis();

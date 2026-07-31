@@ -418,7 +418,6 @@ mod history_dedup_tests {
             anchor: None,
         }
     }
-
     #[test]
     fn identical_payloads_fingerprint_equal() {
         let a = vec![message("user", "hi"), message("assistant", "hello")];
@@ -428,21 +427,16 @@ mod history_dedup_tests {
             history_payload_fingerprint(&b)
         );
     }
-
     #[test]
     fn fingerprint_changes_on_content_role_count_and_tool_data() {
         let base = vec![message("user", "hi"), message("assistant", "hello")];
         let fp = history_payload_fingerprint(&base);
-
         let content = vec![message("user", "hi"), message("assistant", "hello!")];
         assert_ne!(fp, history_payload_fingerprint(&content));
-
         let role = vec![message("user", "hi"), message("system", "hello")];
         assert_ne!(fp, history_payload_fingerprint(&role));
-
         let count = vec![message("user", "hi")];
         assert_ne!(fp, history_payload_fingerprint(&count));
-
         let mut tool = base.clone();
         tool[1].tool_data = Some(super::ToolCall {
             id: "t1".to_string(),
@@ -2227,6 +2221,7 @@ pub(in crate::tui::app) fn handle_server_event(
         } => {
             app.remote_model_switch_in_flight = false;
             if let Some(err) = error {
+                app.remote_model_switch_route_selection = None;
                 if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
                     super::input_dispatch::restore_prepared_remote_input(app, prepared);
                 }
@@ -2252,6 +2247,11 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.remote_provider_name = Some(pname.clone());
                 }
                 app.invalidate_model_picker_cache();
+                crate::tui::app::model_context::model_route_metadata::apply_remote_model_switch_metadata(
+                    app,
+                    &model,
+                    provider_name,
+                );
                 if !app.auth_catalog_refresh_pending {
                     app.push_display_message(DisplayMessage::system(format!(
                         "✓ Switched to model: {}",

@@ -221,25 +221,9 @@ impl App {
         }
     }
 
-    /// Resolve the active credential (OAuth vs API key) for a dual-auth
-    /// provider (Anthropic / OpenAI). This is the one place billing identity is
-    /// decided for the info widget, regardless of transport:
-    ///
-    /// * Remote sessions use [`App::remote_resolved_credential`], which the
-    ///   server resolved authoritatively from its live credentials.
-    /// * Local sessions prefer the provider's *explicitly pinned* credential
-    ///   ([`Provider::active_explicit_credential`]) so the widget reflects the
-    ///   credential the next request will actually use the instant the user
-    ///   switches OAuth<->API (model picker, `/account`, header toggle). That
-    ///   read is in-memory and cache-free, so it never lingers on a stale
-    ///   [`AuthStatus`] snapshot (cached up to 60s) or a `JCODE_RUNTIME_PROVIDER`
-    ///   pin that drifted out of sync with the provider. When the provider is in
-    ///   auto mode (no explicit pin) it falls back to
-    ///   [`resolve_dual_credential_auth`] -- shared with the header tag and
-    ///   model-switch line -- which is cheap (cached probe, no per-frame I/O).
-    ///
-    /// Returns `None` when neither transport can determine the credential (e.g.
-    /// the server didn't report one, or no credentials are configured locally).
+    /// Resolve OAuth vs API-key credential for Anthropic/OpenAI. Uses the
+    /// server-resolved credential when remote, the provider's explicit pin
+    /// when local, and falls back to a cached probe only in auto mode.
     fn dual_credential_active(
         &self,
         route: WidgetRouteInfo,
@@ -389,6 +373,7 @@ impl App {
             spark: None,
             spark_resets_at: None,
             total_cost: self.cost.total_cost,
+            source_label: Some(self.provider_name().to_string()),
             input_tokens: display_input_tokens,
             output_tokens: display_output_tokens,
             cache_read_tokens: self.streaming.streaming_cache_read_tokens,
@@ -409,6 +394,7 @@ impl App {
                 spark: None,
                 spark_resets_at: None,
                 total_cost: 0.0,
+                source_label: None,
                 input_tokens: display_input_tokens,
                 output_tokens: display_output_tokens,
                 cache_read_tokens: None,
@@ -437,6 +423,7 @@ impl App {
                     spark: None,
                     spark_resets_at: None,
                     total_cost: 0.0,
+                    source_label: None,
                     input_tokens: 0,
                     output_tokens: 0,
                     cache_read_tokens: None,
@@ -489,6 +476,7 @@ impl App {
                         .as_ref()
                         .and_then(|w| w.resets_at.clone()),
                     total_cost: 0.0,
+                    source_label: None,
                     input_tokens: 0,
                     output_tokens: 0,
                     cache_read_tokens: None,
@@ -647,11 +635,10 @@ impl crate::tui::TuiState for App {
 
     fn provider_name(&self) -> String {
         if self.is_remote {
-            self.remote_header_provider_name().unwrap_or_default()
+            self.remote_header_provider_name()
+                .unwrap_or_else(|| self.provider.name().to_string())
         } else {
-            self.remote_provider_name
-                .clone()
-                .unwrap_or_else(|| self.provider.display_name())
+            self.provider.name().to_string()
         }
     }
 

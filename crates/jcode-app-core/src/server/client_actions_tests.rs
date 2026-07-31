@@ -118,6 +118,9 @@ fn clone_split_session_uses_persisted_session_state() {
     );
     parent.working_dir = Some("/tmp/jcode-split-test".to_string());
     parent.model = Some("gpt-test".to_string());
+    parent.provider_key = Some("openai-api-key".to_string());
+    parent.route_api_method = Some("openai-api-key".to_string());
+    parent.model_identity_format = Some(1);
     parent.add_message(
         Role::User,
         vec![ContentBlock::Text {
@@ -161,6 +164,9 @@ fn clone_split_session_uses_persisted_session_state() {
     assert_eq!(child.compaction, parent.compaction);
     assert_eq!(child.working_dir, parent.working_dir);
     assert_eq!(child.model, parent.model);
+    assert_eq!(child.provider_key, parent.provider_key);
+    assert_eq!(child.route_api_method, parent.route_api_method);
+    assert_eq!(child.model_identity_format, parent.model_identity_format);
     assert_eq!(child.status, crate::session::SessionStatus::Closed);
     assert_ne!(child.id, parent.id);
 

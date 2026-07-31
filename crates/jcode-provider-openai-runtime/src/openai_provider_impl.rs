@@ -796,6 +796,9 @@ impl Provider for OpenAIProvider {
         // while the mode stays Auto; routing by mode would send that platform
         // key to the ChatGPT/Codex endpoint and get a 401.
         let account_label = jcode_base::auth::codex::active_account_label();
+        let context_scope = jcode_base::provider::models::openai_context_scope_for_account(
+            account_label.as_deref(),
+        );
         let (access_token, is_chatgpt_mode, credential_identity) = {
             let creds = self.credentials.read().await;
             (
@@ -861,7 +864,10 @@ impl Provider for OpenAIProvider {
         self.revalidate_reasoning_effort();
         jcode_base::provider::persist_openai_model_catalog(&catalog);
         if !catalog.context_limits.is_empty() {
-            jcode_base::provider::populate_context_limits(catalog.context_limits);
+            jcode_base::provider::models::populate_context_limits_for_provider(
+                &context_scope,
+                catalog.context_limits,
+            );
         }
         if !catalog.available_models.is_empty() {
             jcode_base::provider::populate_account_models(catalog.available_models);

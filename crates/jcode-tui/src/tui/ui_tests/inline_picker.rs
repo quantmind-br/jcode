@@ -93,3 +93,94 @@ fn model_picker_hotkey_hint_renders_above_the_box() {
         lines[hint_row]
     );
 }
+
+fn homonymous_model_picker_entries() -> Vec<crate::tui::PickerEntry> {
+    vec![
+        crate::tui::PickerEntry {
+            name: "gpt-5.6-sol".to_string(),
+            options: vec![crate::tui::PickerOption {
+                provider: "OpenAI".to_string(),
+                api_method: "openai-oauth".to_string(),
+                available: true,
+                detail: String::new(),
+                estimated_reference_cost_micros: None,
+            }],
+            action: crate::tui::PickerAction::Model,
+            selected_option: 0,
+            is_current: false,
+            is_default: false,
+            is_favorite: false,
+            recommended: false,
+            recommendation_rank: usize::MAX,
+            usage_score: 0,
+            old: false,
+            created_date: None,
+            effort: None,
+        },
+        crate::tui::PickerEntry {
+            name: "gpt-5.6-sol".to_string(),
+            options: vec![crate::tui::PickerOption {
+                provider: "Solarpanel".to_string(),
+                api_method: "openai-compatible:solarpanel".to_string(),
+                available: true,
+                detail: String::new(),
+                estimated_reference_cost_micros: None,
+            }],
+            action: crate::tui::PickerAction::Model,
+            selected_option: 0,
+            is_current: true,
+            is_default: false,
+            is_favorite: false,
+            recommended: false,
+            recommendation_rank: usize::MAX,
+            usage_score: 0,
+            old: false,
+            created_date: None,
+            effort: None,
+        },
+    ]
+}
+
+#[test]
+fn model_picker_renders_provider_identity_for_homonymous_models() {
+    let state = TestState {
+        inline_interactive_state: Some(crate::tui::InlineInteractiveState {
+            kind: crate::tui::PickerKind::Model,
+            filtered: vec![0, 1],
+            selected: 1,
+            column: 0,
+            filter: String::new(),
+            preview: false,
+            entries: homonymous_model_picker_entries(),
+        }),
+        ..Default::default()
+    };
+
+    let lines = render_inline_picker(&state, 120, 12);
+    let joined = lines.join("\n");
+
+    assert!(
+        joined.contains("OpenAI"),
+        "OpenAI row must be visible in the picker:\n{}",
+        joined
+    );
+    assert!(
+        joined.contains("Solarpanel"),
+        "Solarpanel row must be visible in the picker:\n{}",
+        joined
+    );
+
+    // Same short model id should appear for both sources so the rows are not
+    // accidentally de-duplicated into a single ambiguous entry.
+    let pretty_model = "GPT-5.6 Sol";
+    let model_occurrences = lines
+        .iter()
+        .filter(|line| line.contains(pretty_model))
+        .count();
+    assert!(
+        model_occurrences >= 2,
+        "picker must list the model once per provider, got {} occurrences:\n{}",
+        model_occurrences,
+        joined
+    );
+}

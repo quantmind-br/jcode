@@ -409,6 +409,19 @@ fn maybe_persist_default_provider_after_login(
 ) {
     let cfg = crate::config::Config::load();
     if cfg.provider.default_provider.is_some() {
+        if let (Some(model), Some(provider_id)) = (
+            cfg.provider.default_model.as_deref(),
+            cfg.provider.default_provider.as_deref(),
+        ) {
+            if let Err(err) =
+                crate::config::Config::set_default_model(Some(model), Some(provider_id))
+            {
+                crate::logging::warn(&format!(
+                    "Failed to normalize the configured default model after login: {}",
+                    err
+                ));
+            }
+        }
         return;
     }
 
@@ -428,6 +441,9 @@ fn maybe_persist_default_provider_after_login(
             .or_else(|| resolve_openai_compatible_profile(profile).default_model),
         _ => None,
     };
+
+    let suggested_model = suggested_model
+        .map(|model| crate::config::qualify_default_model(&model, Some(provider_id)));
 
     let model_to_save = cfg
         .provider

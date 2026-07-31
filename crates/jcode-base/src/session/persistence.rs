@@ -315,6 +315,20 @@ impl Session {
     }
 
     pub fn save(&mut self) -> Result<()> {
+        if self.model_identity_format == Some(1)
+            && let Some(model) = self.model.as_deref()
+        {
+            let canonical =
+                crate::provider::MultiProvider::canonical_session_model_with_identity_format(
+                    model,
+                    self.provider_key.as_deref(),
+                    self.route_api_method.as_deref(),
+                    self.model_identity_format,
+                );
+            if canonical != model {
+                self.model = Some(canonical);
+            }
+        }
         self.updated_at = Utc::now();
         let path = session_path(&self.id)?;
         let journal_path = session_journal_path_from_snapshot(&path);

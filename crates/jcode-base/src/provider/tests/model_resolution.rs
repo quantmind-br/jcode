@@ -696,17 +696,21 @@ fn test_set_model_accepts_bare_openai_openrouter_pin_when_openrouter_available()
 fn test_active_compatible_route_treats_claude_like_bare_model_as_provider_local() {
     with_clean_provider_test_env(|| {
         with_env_var("OPENROUTER_API_KEY", "test-openrouter-key", || {
-            with_env_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "0", || {
-                with_env_var(
+            with_env_var("OPENAI_API_KEY", "test-openai-key", || {
+                with_env_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "0", || {
+                    with_env_var(
                     "JCODE_OPENROUTER_API_BASE",
                     "https://compat.example.test/v1",
                     || {
+                        let runtime = enter_test_runtime();
+                        let _runtime_guard = runtime.enter();
                         let openrouter = test_openrouter_runtime()
                             .expect("custom compatible provider should initialize");
+                        let openai = test_openai_runtime();
                         let provider = MultiProvider {
                             claude: RwLock::new(None),
                             anthropic: RwLock::new(None),
-                            openai: RwLock::new(None),
+                            openai: RwLock::new(Some(openai)),
                             copilot_api: RwLock::new(None),
                             antigravity: RwLock::new(None),
                             gemini: RwLock::new(None),
@@ -734,7 +738,8 @@ fn test_active_compatible_route_treats_claude_like_bare_model_as_provider_local(
                         assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
                         assert_eq!(provider.model(), "claude-opus4.6-thinking");
                     },
-                )
+                    )
+                })
             })
         })
     });
@@ -749,6 +754,8 @@ fn test_active_compatible_route_preserves_custom_at_sign_model_ids() {
                     "JCODE_OPENROUTER_API_BASE",
                     "https://compat.example.test/v1",
                     || {
+                        let runtime = enter_test_runtime();
+                        let _runtime_guard = runtime.enter();
                         let openrouter = test_openrouter_runtime()
                             .expect("custom compatible provider should initialize");
                         let provider = MultiProvider {
@@ -854,6 +861,8 @@ fn test_custom_compatible_model_routes_do_not_request_openrouter_rewrite() {
                     "JCODE_OPENROUTER_API_BASE",
                     "https://compat.example.test/v1",
                     || {
+                        let runtime = enter_test_runtime();
+                        let _runtime_guard = runtime.enter();
                         let openrouter = test_openrouter_runtime()
                             .expect("custom compatible provider should initialize");
                         let provider = MultiProvider {
@@ -1062,6 +1071,169 @@ input = ["image"]
             .expect("configured named-profile default must bind the profile runtime");
         assert_eq!(provider2.active_provider(), ActiveProvider::OpenRouter);
         assert_eq!(provider2.model(), "vendor/my-model");
+    });
+}
+
+fn empty_model_resolution_provider(active: ActiveProvider) -> MultiProvider {
+    MultiProvider {
+        claude: RwLock::new(None),
+        anthropic: RwLock::new(None),
+        openai: RwLock::new(None),
+        copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(None),
+        gemini: RwLock::new(None),
+        cursor: RwLock::new(None),
+        bedrock: RwLock::new(None),
+        openrouter: RwLock::new(None),
+        openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+        active_openai_compatible_profile: RwLock::new(None),
+        active: RwLock::new(active),
+        use_claude_cli: false,
+        startup_notices: RwLock::new(Vec::new()),
+        initial_provider: None,
+        routes_memo: std::sync::Mutex::new(None),
+        post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    }
+}
+
+fn write_model_resolution_named_profile(name: &str, model: &str) {
+    let jcode_home = std::env::var_os("JCODE_HOME").expect("test JCODE_HOME should be set");
+    std::fs::write(
+        std::path::PathBuf::from(jcode_home).join("config.toml"),
+        format!(
+            r#"
+[providers.{name}]
+type = "openai-compatible"
+base_url = "http://localhost:8000/v1"
+auth = "none"
+default_model = "{model}"
+
+[[providers.{name}.models]]
+id = "{model}"
+input = ["text"]
+"#
+        ),
+    )
+    .expect("write named provider config");
+    crate::config::invalidate_config_cache();
+}
+
+#[test]
+fn canonical_model_spec_parser_preserves_remainder_and_legacy_colon_forms() {
+    let canonical = jcode_provider_core::parse_model_spec(" sol/vendor/model/with/slashes ");
+    assert_eq!(canonical.provider.as_deref(), Some("sol"));
+    assert_eq!(canonical.model, "vendor/model/with/slashes");
+    assert_eq!(
+        canonical.separator,
+        Some(jcode_provider_core::ModelSpecSeparator::Slash)
+    );
+
+    let legacy = jcode_provider_core::parse_model_spec("profile:vendor/model:version");
+    assert_eq!(legacy.provider.as_deref(), Some("profile"));
+    assert_eq!(legacy.model, "vendor/model:version");
+    assert_eq!(
+        legacy.separator,
+        Some(jcode_provider_core::ModelSpecSeparator::LegacyColon)
+    );
+}
+
+#[test]
+fn qualified_builtin_and_known_compatible_specs_select_exact_routes() {
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _runtime_guard = runtime.enter();
+
+        let provider = test_multi_provider_with_openai();
+        provider
+            .set_model("openai/gpt-5.6-sol")
+            .expect("qualified OpenAI model should select the native OpenAI route");
+        assert_eq!(provider.active_provider(), ActiveProvider::OpenAI);
+        assert_eq!(provider.model(), "gpt-5.6-sol");
+
+        with_env_var("CEREBRAS_API_KEY", "test-cerebras-key", || {
+            let provider = empty_model_resolution_provider(ActiveProvider::Claude);
+            provider
+                .set_model("cerebras/gpt-oss-120b")
+                .expect("qualified compatible model should select the named compatible route");
+            assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
+            assert_eq!(provider.model(), "gpt-oss-120b");
+            assert_eq!(provider.display_name(), "Cerebras");
+        });
+    });
+}
+
+#[test]
+fn qualified_named_profile_and_legacy_colon_specs_preserve_profile_identity() {
+    with_clean_provider_test_env(|| {
+        write_model_resolution_named_profile("sol-gateway", "gpt-5.6-sol");
+        let runtime = enter_test_runtime();
+        let _runtime_guard = runtime.enter();
+        let provider = empty_model_resolution_provider(ActiveProvider::Claude);
+
+        provider
+            .set_model("sol-gateway/vendor/model/with/slashes")
+            .expect("qualified named profile model should preserve opaque remainder");
+        assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
+        assert_eq!(provider.model(), "vendor/model/with/slashes");
+        assert_eq!(provider.display_name(), "sol-gateway");
+
+        provider
+            .set_model("sol-gateway:gpt-5.6-sol")
+            .expect("legacy named profile colon form should remain selectable");
+        assert_eq!(provider.model(), "gpt-5.6-sol");
+        assert_eq!(provider.display_name(), "sol-gateway");
+    });
+}
+
+#[test]
+fn unique_bare_exact_route_selects_named_profile_and_collision_is_explicit() {
+    with_clean_provider_test_env(|| {
+        write_model_resolution_named_profile("sol-gateway", "gpt-5.6-sol");
+        let runtime = enter_test_runtime();
+        let _runtime_guard = runtime.enter();
+
+        let unique = empty_model_resolution_provider(ActiveProvider::Claude);
+        unique
+            .set_model("gpt-5.6-sol")
+            .expect("a bare model with one active route should resolve exactly");
+        assert_eq!(unique.active_provider(), ActiveProvider::OpenRouter);
+        assert_eq!(unique.model(), "gpt-5.6-sol");
+        assert_eq!(unique.display_name(), "sol-gateway");
+
+        let collision = test_multi_provider_with_openai();
+        crate::auth::AuthStatus::invalidate_cache();
+        let error = collision
+            .set_model("gpt-5.6-sol")
+            .expect_err("a bare model shared by OpenAI and a named profile must be ambiguous");
+        let message = error.to_string();
+        assert!(message.contains("openai/gpt-5.6-sol"), "{message}");
+        assert!(message.contains("sol-gateway/gpt-5.6-sol"), "{message}");
+        assert!(message.contains("provider/model"), "{message}");
+    });
+}
+
+#[test]
+fn bare_unique_dual_auth_route_keeps_auto_credential_mode() {
+    use jcode_provider_core::{CredentialMode, Provider};
+
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _runtime_guard = runtime.enter();
+        let provider = test_multi_provider_with_openai();
+        let model = known_openai_model_ids()
+            .first()
+            .expect("at least one OpenAI model")
+            .clone();
+
+        assert_eq!(provider.openai_provider().unwrap().credential_mode(), CredentialMode::Auto);
+        provider
+            .set_model(&model)
+            .expect("bare model with one provider identity should select its exact route");
+
+        assert_eq!(provider.active_provider(), ActiveProvider::OpenAI);
+        assert_eq!(provider.model(), model);
+        assert_eq!(provider.openai_provider().unwrap().credential_mode(), CredentialMode::Auto);
+        assert_eq!(provider.active_explicit_credential(), None);
     });
 }
 
@@ -1810,17 +1982,83 @@ fn test_context_limit_respects_provider_hint() {
 
 #[test]
 fn test_resolve_model_capabilities_uses_provider_hint() {
-    let openai = resolve_model_capabilities("gpt-5.4", Some("openai"));
-    assert_eq!(openai.provider.as_deref(), Some("openai"));
-    assert_eq!(openai.context_window, Some(1_000_000));
+    with_clean_provider_test_env(|| {
+        // Reproduce the suite-order interaction: an earlier native OpenAI
+        // catalog can leave a shorter value for gpt-5.4 in the shared cache.
+        // The explicit native provider hint must still use the canonical
+        // static 1M capability, while other provider hints retain their own
+        // limits.
+        populate_context_limits(
+            [("gpt-5.4".to_string(), 272_000)]
+                .into_iter()
+                .collect(),
+        );
 
-    let copilot = resolve_model_capabilities("gpt-5.4", Some("copilot"));
-    assert_eq!(copilot.provider.as_deref(), Some("copilot"));
-    assert_eq!(copilot.context_window, Some(128_000));
+        let openai = resolve_model_capabilities("gpt-5.4", Some("openai"));
+        assert_eq!(openai.provider.as_deref(), Some("openai"));
+        assert_eq!(openai.context_window, Some(1_000_000));
 
-    let gemini = resolve_model_capabilities("gemini-2.5-pro", Some("gemini"));
-    assert_eq!(gemini.provider.as_deref(), Some("gemini"));
-    assert_eq!(gemini.context_window, Some(1_000_000));
+        let copilot = resolve_model_capabilities("gpt-5.4", Some("copilot"));
+        assert_eq!(copilot.provider.as_deref(), Some("copilot"));
+        assert_eq!(copilot.context_window, Some(128_000));
+
+        let gemini = resolve_model_capabilities("gemini-2.5-pro", Some("gemini"));
+        assert_eq!(gemini.provider.as_deref(), Some("gemini"));
+        assert_eq!(gemini.context_window, Some(1_000_000));
+    });
+}
+
+#[test]
+fn native_catalog_context_limits_are_scoped_for_uncurated_models() {
+    with_clean_provider_test_env(|| {
+        let openai_account = "oracle-openai";
+        let claude_account = "oracle-claude";
+
+        crate::auth::codex::set_active_account_override(Some(openai_account.to_string()));
+        models::populate_context_limits_for_provider(
+            &models::openai_context_scope_for_account(Some(openai_account)),
+            [
+                ("gpt-6-preview".to_string(), 611_111),
+                ("gpt-6-opaque-shared".to_string(), 622_222),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            context_limit_for_model_with_provider("gpt-6-preview", Some("openai")),
+            Some(611_111)
+        );
+
+        crate::auth::claude::set_active_account_override(Some(claude_account.to_string()));
+        models::populate_context_limits_for_provider(
+            &models::anthropic_context_scope_for_account(Some(claude_account)),
+            [
+                ("claude-nebula-preview".to_string(), 733_333),
+                ("gpt-6-opaque-shared".to_string(), 744_444),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            context_limit_for_model_with_provider("claude-nebula-preview", Some("claude")),
+            Some(733_333)
+        );
+        assert_eq!(
+            context_limit_for_model_with_provider("gpt-6-opaque-shared", Some("claude")),
+            Some(744_444)
+        );
+        assert_eq!(
+            context_limit_for_model_with_provider("gpt-6-opaque-shared", Some("openai")),
+            Some(622_222)
+        );
+
+        // The opaque OpenAI catalog value must not leak into the native Claude
+        // namespace, even though both providers can serve the same bare id.
+        assert_ne!(
+            context_limit_for_model_with_provider("gpt-6-preview", Some("claude")),
+            Some(611_111)
+        );
+    });
 }
 
 #[test]
@@ -2333,5 +2571,157 @@ fn bare_openai_compatible_model_id_routes_to_its_profile_not_the_active_provider
             provider.fork_model_switch_request(provider.active_provider(), &provider.model()),
             "celeris:celeris-1"
         );
+    });
+}
+
+#[test]
+fn unknown_bare_model_reports_no_active_route_instead_of_using_active_provider() {
+    with_clean_provider_test_env(|| {
+        let provider = empty_model_resolution_provider(ActiveProvider::Claude);
+        let error = provider
+            .set_model("gpt-future-unlisted")
+            .expect_err("unknown bare model must not silently use active provider");
+        assert!(error.to_string().contains("No active provider route"));
+        assert!(error.to_string().contains("gpt-future-unlisted"));
+    });
+}
+
+#[test]
+fn bare_openrouter_selection_keeps_auto_route_without_endpoint_pin() {
+    use jcode_provider_core::Provider;
+
+    with_clean_provider_test_env(|| {
+        with_env_var("OPENROUTER_API_KEY", "test-openrouter-key", || {
+            save_test_openrouter_model_cache(
+                "openrouter",
+                "https://openrouter.ai/api/v1",
+                &["openrouter/owl-alpha"],
+            );
+            let runtime = enter_test_runtime();
+            let _runtime_guard = runtime.enter();
+            let openrouter =
+                test_openrouter_runtime().expect("OpenRouter provider should initialize");
+            let provider = MultiProvider {
+                claude: RwLock::new(None),
+                anthropic: RwLock::new(None),
+                openai: RwLock::new(None),
+                copilot_api: RwLock::new(None),
+                antigravity: RwLock::new(None),
+                gemini: RwLock::new(None),
+                cursor: RwLock::new(None),
+                bedrock: RwLock::new(None),
+                openrouter: RwLock::new(Some(openrouter)),
+                openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+                active_openai_compatible_profile: RwLock::new(None),
+                active: RwLock::new(ActiveProvider::OpenRouter),
+                use_claude_cli: false,
+                startup_notices: RwLock::new(Vec::new()),
+                initial_provider: None,
+                routes_memo: std::sync::Mutex::new(None),
+                post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            };
+
+            let auto_route = provider
+                .model_routes()
+                .into_iter()
+                .find(|route| {
+                    route.model == "openrouter/owl-alpha"
+                        && route.provider == "auto"
+                        && route.api_method == "openrouter"
+                        && route.available
+                })
+                .expect("OpenRouter auto route should be available");
+            let selection = crate::provider::RouteSelection::from_model_route(&auto_route);
+            provider
+                .set_route_selection(&selection)
+                .expect("bare OpenRouter model should select the auto route");
+            assert_eq!(provider.model(), "openrouter/owl-alpha");
+            assert_eq!(provider.active_explicit_credential(), None);
+            assert_eq!(
+                selection.routed_model_spec(),
+                "openrouter/owl-alpha".to_string()
+            );
+            assert_eq!(
+                provider.fork_model_switch_request(provider.active_provider(), &provider.model()),
+                "openrouter:openrouter/owl-alpha"
+            );
+            assert_eq!(
+                provider
+                    .active_openrouter_execution_provider()
+                    .expect("active OpenRouter runtime")
+                    .explicit_provider_pin_for_current_model(),
+                None,
+                "bare OpenRouter selection must not retain an endpoint @ pin"
+            );
+        });
+    });
+}
+
+#[test]
+fn canonical_slash_route_precedes_active_compatible_opaque_fallback() {
+    with_clean_provider_test_env(|| {
+        write_model_resolution_named_profile("other-named-provider", "model");
+        with_env_var("OPENROUTER_API_KEY", "test-openrouter-key", || {
+            with_env_var("OPENAI_API_KEY", "test-openai-key", || {
+                with_env_var("CEREBRAS_API_KEY", "test-cerebras-key", || {
+                with_env_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "0", || {
+                    with_env_var(
+                    "JCODE_OPENROUTER_API_BASE",
+                    "https://compat.example.test/v1",
+                    || {
+                        let runtime = enter_test_runtime();
+                        let _runtime_guard = runtime.enter();
+                        let openrouter = test_openrouter_runtime()
+                            .expect("custom compatible provider should initialize");
+                        let openai = test_openai_runtime();
+                        let provider = MultiProvider {
+                            claude: RwLock::new(None),
+                            anthropic: RwLock::new(None),
+                            openai: RwLock::new(Some(openai)),
+                            copilot_api: RwLock::new(None),
+                            antigravity: RwLock::new(None),
+                            gemini: RwLock::new(None),
+                            cursor: RwLock::new(None),
+                            bedrock: RwLock::new(None),
+                            openrouter: RwLock::new(Some(openrouter)),
+                            openai_compatible_profiles: RwLock::new(
+                                std::collections::HashMap::new(),
+                            ),
+                            active_openai_compatible_profile: RwLock::new(None),
+                            active: RwLock::new(ActiveProvider::OpenRouter),
+                            use_claude_cli: false,
+                            startup_notices: RwLock::new(Vec::new()),
+                            initial_provider: None,
+                            routes_memo: std::sync::Mutex::new(None),
+                            post_auth_refreshes_pending: Arc::new(
+                                std::sync::atomic::AtomicUsize::new(0),
+                            ),
+                        };
+
+                        provider
+                            .set_model("openai/gpt-5.6-sol")
+                            .expect("canonical OpenAI route should bypass compatible fallback");
+                        assert_eq!(provider.active_provider(), ActiveProvider::OpenAI);
+                        assert_eq!(provider.model(), "gpt-5.6-sol");
+
+                        provider
+                            .set_model("other-named-provider/model")
+                            .expect("canonical named provider route should bypass compatible fallback");
+                        assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
+                        assert_eq!(provider.model(), "model");
+                        assert_eq!(provider.display_name(), "other-named-provider");
+
+                        provider
+                            .set_model("cerebras/gpt-oss-120b")
+                            .expect("canonical compatible profile route should bypass compatible fallback");
+                        assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
+                        assert_eq!(provider.model(), "gpt-oss-120b");
+                        assert_eq!(provider.display_name(), "Cerebras");
+                    },
+                    )
+                })
+                })
+            })
+        })
     });
 }

@@ -516,7 +516,7 @@ fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> 
     assert_eq!(stub.id, session_id);
     assert_eq!(stub.parent_id.as_deref(), Some("parent_123"));
     assert_eq!(stub.title.as_deref(), Some("startup stub"));
-    assert_eq!(stub.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(stub.model.as_deref(), Some("openai/gpt-5.4"));
     assert_eq!(stub.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(stub.provider_key.as_deref(), Some("openai"));
     assert_eq!(stub.route_api_method.as_deref(), Some("openai-api"));
@@ -797,12 +797,159 @@ fn test_save_persists_provider_key() -> Result<()> {
     );
     session.provider_key = Some("opencode".to_string());
     session.model = Some("anthropic/claude-sonnet-4".to_string());
+    session.model_identity_format = Some(1);
 
     session.save()?;
 
     let loaded = Session::load("session_provider_key_persist_test")?;
     assert_eq!(loaded.provider_key.as_deref(), Some("opencode"));
-    assert_eq!(loaded.model.as_deref(), Some("anthropic/claude-sonnet-4"));
+    assert_eq!(
+        loaded.model.as_deref(),
+        Some("opencode/anthropic/claude-sonnet-4")
+    );
+    Ok(())
+}
+
+#[test]
+fn test_save_canonicalizes_session_model_without_flattening_route_metadata() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-canonical-model-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let mut session = Session::create_with_id(
+        "session_canonical_model_persist_test".to_string(),
+        None,
+        Some("canonical model persistence test".to_string()),
+    );
+    session.model = Some("gpt-5.6-sol".to_string());
+    session.provider_key = Some("openai-api".to_string());
+    session.route_api_method = Some("openai-api-key".to_string());
+    session.model_identity_format = Some(1);
+
+    session.save()?;
+
+    let loaded = Session::load("session_canonical_model_persist_test")?;
+    assert_eq!(loaded.model.as_deref(), Some("openai/gpt-5.6-sol"));
+    assert_eq!(loaded.provider_key.as_deref(), Some("openai-api"));
+    assert_eq!(loaded.route_api_method.as_deref(), Some("openai-api-key"));
+    Ok(())
+}
+
+#[test]
+fn test_openrouter_canonical_identity_is_idempotent_and_preserves_pin() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-openrouter-identity-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let mut session = Session::create_with_id(
+        "session_openrouter_identity_persist_test".to_string(),
+        None,
+        Some("OpenRouter identity persistence test".to_string()),
+    );
+    session.model = Some("openai/gpt-5.4@OpenAI".to_string());
+    session.provider_key = Some("openrouter".to_string());
+    session.route_api_method = Some("openrouter".to_string());
+
+    session.save()?;
+    assert_eq!(
+        session.model.as_deref(),
+        Some("openrouter/openai/gpt-5.4@OpenAI")
+    );
+
+    let loaded = Session::load("session_openrouter_identity_persist_test")?;
+    assert_eq!(
+        loaded.model.as_deref(),
+        Some("openrouter/openai/gpt-5.4@OpenAI")
+    );
+    assert_eq!(loaded.model_identity_format, Some(1));
+    Ok(())
+}
+
+#[test]
+fn test_format_one_openrouter_custom_identity_is_byte_stable_across_saves() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-openrouter-custom-identity-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let mut session = Session::create_with_id(
+        "session_openrouter_custom_identity_persist_test".to_string(),
+        None,
+        Some("OpenRouter custom identity persistence test".to_string()),
+    );
+    session.model = Some("openrouter/custom-model".to_string());
+    session.provider_key = Some("openrouter".to_string());
+    session.route_api_method = Some("openrouter".to_string());
+    session.model_identity_format = Some(1);
+
+    session.save()?;
+    assert_eq!(session.model.as_deref(), Some("openrouter/custom-model"));
+    let mut first_load = Session::load("session_openrouter_custom_identity_persist_test")?;
+    assert_eq!(first_load.model.as_deref(), Some("openrouter/custom-model"));
+
+    first_load.save()?;
+    let second_load = Session::load("session_openrouter_custom_identity_persist_test")?;
+    assert_eq!(
+        second_load.model.as_deref(),
+        first_load.model.as_deref(),
+        "format-1 model identity must remain byte-stable across saves"
+    );
+    let request = crate::provider::MultiProvider::model_switch_request_for_session_route(
+        second_load.model.as_deref().expect("model"),
+        second_load.provider_key.as_deref(),
+        second_load.route_api_method.as_deref(),
+    );
+    assert_eq!(request, "openrouter:openrouter/custom-model");
+    assert_eq!(
+        crate::provider::MultiProvider::model_switch_request_for_session_route_with_identity_format(
+            second_load.model.as_deref().expect("model"),
+            second_load.provider_key.as_deref(),
+            second_load.route_api_method.as_deref(),
+            second_load.model_identity_format,
+        ),
+        "openrouter:custom-model"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_legacy_openrouter_native_identity_without_marker_keeps_historical_restore() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-openrouter-legacy-identity-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let mut session = Session::create_with_id(
+        "session_openrouter_legacy_identity_persist_test".to_string(),
+        None,
+        Some("OpenRouter legacy identity persistence test".to_string()),
+    );
+    session.model = Some("openrouter/owl-alpha".to_string());
+    session.provider_key = Some("openrouter".to_string());
+    session.route_api_method = Some("openrouter".to_string());
+    session.model_identity_format = None;
+
+    session.save()?;
+    let loaded = Session::load("session_openrouter_legacy_identity_persist_test")?;
+    assert_eq!(loaded.model.as_deref(), Some("openrouter/owl-alpha"));
+    assert_eq!(
+        crate::provider::MultiProvider::model_switch_request_for_session_route(
+            loaded.model.as_deref().expect("model"),
+            loaded.provider_key.as_deref(),
+            loaded.route_api_method.as_deref(),
+        ),
+        "openrouter:openrouter/owl-alpha"
+    );
     Ok(())
 }
 

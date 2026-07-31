@@ -1,6 +1,5 @@
-use super::{ALL_OPENAI_MODELS, openrouter};
+use super::openrouter;
 use crate::auth;
-use crate::provider::models::provider_for_model;
 use jcode_provider_core::pricing as core_pricing;
 use jcode_provider_core::{RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource};
 use std::sync::Mutex;
@@ -135,7 +134,9 @@ pub(crate) fn openrouter_route_pricing(
     model: &str,
     provider: &str,
 ) -> Option<RouteCheapnessEstimate> {
-    let cache = openrouter::load_endpoints_disk_cache_public(model);
+    let catalog_model =
+        crate::provider::openrouter_catalog_model_id(model).unwrap_or_else(|| model.to_string());
+    let cache = openrouter::load_endpoints_disk_cache_public(&catalog_model);
     if let Some((endpoints, _)) = cache.as_ref() {
         if provider == "auto"
             && let Some(best) = endpoints.first()
@@ -160,7 +161,7 @@ pub(crate) fn openrouter_route_pricing(
         }
     }
 
-    openrouter::load_model_pricing_disk_cache_public(model).and_then(|pricing| {
+    openrouter::load_model_pricing_disk_cache_public(&catalog_model).and_then(|pricing| {
         openrouter_pricing_from_model_pricing(
             &pricing,
             RouteCostSource::OpenRouterCatalog,
@@ -278,17 +279,14 @@ pub(crate) fn cheapness_for_route(
     match api_method {
         "copilot" => Some(copilot_pricing(model)),
         "openrouter" => {
-            let model_id = if model.contains('/') {
-                model.to_string()
-            } else if provider_for_model(model) == Some("claude") {
-                format!("anthropic/{}", model)
-            } else if ALL_OPENAI_MODELS.contains(&model) {
-                format!("openai/{}", model)
-            } else {
-                model.to_string()
-            };
-            openrouter_route_pricing(&model_id, provider)
-                .or_else(|| metered_pricing_for_source("openrouter", &model_id))
+            let model_id = crate::provider::openrouter_catalog_model_id(model)
+                .unwrap_or_else(|| model.to_string());
+            openrouter_route_pricing(&model_id, provider).or_else(|| {
+                // The OpenRouter bucket is explicit here; models.dev must not
+                // interpret a bare native-looking id as a direct OpenAI or
+                // Anthropic route.
+                metered_pricing_for_source("openrouter", &model_id)
+            })
         }
         _ => None,
     }
@@ -365,6 +363,74 @@ mod tests {
         assert_eq!(estimate.input_price_per_mtok_micros, Some(2_500_000));
         assert_eq!(estimate.output_price_per_mtok_micros, Some(15_000_000));
         assert_eq!(estimate.cache_read_price_per_mtok_micros, Some(250_000));
+    }
+
+    #[test]
+    fn openrouter_endpoint_pricing_uses_canonical_model_for_auto_and_pinned_routes() {
+        with_clean_provider_test_env(|| {
+            let temp_home = tempfile::tempdir().expect("temp home");
+            let previous_home = std::env::var_os("HOME");
+            let previous_namespace = std::env::var_os("JCODE_OPENROUTER_CACHE_NAMESPACE");
+            env::set_var("HOME", temp_home.path());
+            env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", "openrouter");
+
+            jcode_provider_openrouter::save_endpoints_disk_cache(
+                "openai/gpt-5.4",
+                &[
+                    jcode_provider_openrouter::EndpointInfo {
+                        provider_name: "OpenAI".to_string(),
+                        tag: None,
+                        pricing: openrouter::ModelPricing {
+                            prompt: Some("0.000001".to_string()),
+                            completion: Some("0.000003".to_string()),
+                            ..Default::default()
+                        },
+                        context_length: None,
+                        max_completion_tokens: None,
+                        quantization: None,
+                        uptime_last_30m: None,
+                        latency_last_30m: None,
+                        throughput_last_30m: None,
+                        supports_implicit_caching: None,
+                        status: None,
+                    },
+                    jcode_provider_openrouter::EndpointInfo {
+                        provider_name: "Anthropic".to_string(),
+                        tag: None,
+                        pricing: openrouter::ModelPricing {
+                            prompt: Some("0.000002".to_string()),
+                            completion: Some("0.000004".to_string()),
+                            ..Default::default()
+                        },
+                        context_length: None,
+                        max_completion_tokens: None,
+                        quantization: None,
+                        uptime_last_30m: None,
+                        latency_last_30m: None,
+                        throughput_last_30m: None,
+                        supports_implicit_caching: None,
+                        status: None,
+                    },
+                ],
+            );
+
+            let auto = openrouter_route_pricing("gpt-5.4", "auto").expect("auto pricing");
+            assert_eq!(auto.input_price_per_mtok_micros, Some(1_000_000));
+            let pinned =
+                openrouter_route_pricing("gpt-5.4", "Anthropic").expect("pinned endpoint pricing");
+            assert_eq!(pinned.input_price_per_mtok_micros, Some(2_000_000));
+
+            if let Some(previous_home) = previous_home {
+                env::set_var("HOME", previous_home);
+            } else {
+                env::remove_var("HOME");
+            }
+            if let Some(previous_namespace) = previous_namespace {
+                env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", previous_namespace);
+            } else {
+                env::remove_var("JCODE_OPENROUTER_CACHE_NAMESPACE");
+            }
+        });
     }
 
     #[test]

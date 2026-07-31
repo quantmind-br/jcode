@@ -1120,12 +1120,18 @@ fn create_launch_session(request: &LaunchRequest) -> Result<(String, PathBuf)> {
 
     let mut session = Session::create(None, Some("Jade relay launch".to_string()));
     session.working_dir = Some(cwd.display().to_string());
+    let provider_key = request.provider_key.as_deref();
     if let Some(model) = &request.model {
-        session.model = Some(model.clone());
+        session.model = Some(crate::provider::MultiProvider::canonical_session_model(
+            model,
+            provider_key,
+            None,
+        ));
     }
     if let Some(provider_key) = &request.provider_key {
         session.provider_key = Some(provider_key.clone());
     }
+    session.model_identity_format = Some(1);
     if request.selfdev {
         session.set_canary("self-dev");
     }

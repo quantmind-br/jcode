@@ -985,6 +985,128 @@ fn populate_context_limits_from_config_ref_seeds_global_cache() {
 }
 
 #[test]
+fn default_model_setter_qualifies_bare_models_without_double_prefixing() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    Config::set_default_model(Some("gpt-5.5"), Some("openai")).expect("save default");
+    let cfg = Config::load();
+    assert_eq!(
+        cfg.provider.default_model.as_deref(),
+        Some("openai/gpt-5.5")
+    );
+    assert_eq!(cfg.provider.default_provider.as_deref(), Some("openai"));
+
+    Config::set_default_model(Some("openai/gpt-5.5"), Some("openai"))
+        .expect("save canonical default");
+    assert_eq!(
+        Config::load().provider.default_model.as_deref(),
+        Some("openai/gpt-5.5")
+    );
+
+    Config::set_default_model(Some("claude-api:claude-sonnet-4-5"), Some("claude"))
+        .expect("save legacy credential form");
+    assert_eq!(
+        Config::load().provider.default_model.as_deref(),
+        Some("claude-api:claude-sonnet-4-5")
+    );
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    Config::invalidate_cache();
+}
+
+#[test]
+fn named_provider_defaults_and_model_ids_remain_opaque_on_generic_config_load() {
+    let cfg: Config = toml::from_str(
+        r#"
+        [providers.gateway]
+        base_url = "http://localhost:8000/v1"
+        default_model = "gateway/local-model"
+
+        [[providers.gateway.models]]
+        id = "local-model"
+        "#,
+    )
+    .expect("config should parse");
+    assert_eq!(
+        cfg.providers["gateway"].default_model.as_deref(),
+        Some("gateway/local-model")
+    );
+    assert_eq!(cfg.providers["gateway"].models[0].id, "local-model");
+    assert_eq!(
+        super::normalize_named_provider_default_model("gateway", "gateway/local-model"),
+        "local-model"
+    );
+}
+
+#[test]
+fn named_provider_defaults_remain_opaque_across_file_load_and_save() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        r#"
+[providers.gateway]
+base_url = "http://localhost:8000/v1"
+default_model = "gateway/local-model"
+
+[[providers.gateway.models]]
+id = "vendor/model/with/slashes"
+"#,
+    )
+    .expect("write config");
+
+    let cfg = Config::load();
+    assert_eq!(
+        cfg.providers["gateway"].default_model.as_deref(),
+        Some("gateway/local-model")
+    );
+    assert_eq!(
+        cfg.providers["gateway"].models[0].id,
+        "vendor/model/with/slashes"
+    );
+    cfg.save().expect("save config");
+    let saved = std::fs::read_to_string(temp.path().join("config.toml")).expect("read config");
+    assert!(saved.contains("default_model = \"gateway/local-model\""));
+    assert!(saved.contains("id = \"vendor/model/with/slashes\""));
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    Config::invalidate_cache();
+}
+
+#[test]
+fn qualify_default_model_prefixes_local_slash_ids_and_preserves_openrouter_ids() {
+    assert_eq!(
+        super::qualify_default_model("vendor/model/with/slashes", Some("gateway")),
+        "gateway/vendor/model/with/slashes"
+    );
+    assert_eq!(
+        super::qualify_default_model("gateway/vendor/model", Some("gateway")),
+        "gateway/vendor/model"
+    );
+    assert_eq!(
+        super::qualify_default_model("anthropic/claude-sonnet-4-6", Some("openrouter")),
+        "anthropic/claude-sonnet-4-6"
+    );
+    assert_eq!(
+        super::qualify_default_model("openai/gpt-5.5", Some("gateway")),
+        "gateway/openai/gpt-5.5"
+    );
+}
+
+#[test]
 fn populate_context_limits_from_config_seeds_qualified_runtime_model_shapes() {
     use super::{NamedProviderConfig, NamedProviderModelConfig};
 

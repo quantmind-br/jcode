@@ -224,15 +224,21 @@ pub(super) fn handle_bus_event(
             app.upstream_provider = None;
             app.invalidate_model_picker_cache();
             app.update_context_limit_for_model(&model);
-            app.session.provider_key = provider_key.or_else(|| {
-                crate::provider::MultiProvider::session_provider_key_after_model_switch(
-                    &model,
-                    app.provider.name(),
-                    app.session.provider_key.as_deref(),
-                )
-            });
-            app.session.model = Some(model.clone());
-            let _ = app.session.save();
+            let provider_key = provider_key
+                .as_deref()
+                .or(app.session.provider_key.as_deref());
+            let meta = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
+                &model,
+                app.provider.name(),
+                provider_key,
+            );
+            crate::tui::app::model_context::model_route_metadata::apply_session_route_metadata(
+                app,
+                meta.model,
+                meta.provider_key,
+                meta.route_api_method,
+                meta.model_identity_format,
+            );
             if !app.auth_catalog_refresh_pending {
                 app.push_display_message(crate::tui::DisplayMessage::system(message));
             }

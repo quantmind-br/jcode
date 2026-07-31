@@ -94,10 +94,13 @@ impl Agent {
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
         self.provider.set_route_selection(selection)?;
+        let metadata =
+            crate::provider::MultiProvider::session_route_metadata_from_selection(selection);
         let resolved_model = self.provider.model();
-        self.session.provider_key = Some(selection.runtime_key.stable_id());
-        self.session.route_api_method = Some(selection.api_method.clone());
-        self.session.model = Some(resolved_model.clone());
+        self.session.model = Some(metadata.model);
+        self.session.provider_key = metadata.provider_key;
+        self.session.route_api_method = metadata.route_api_method;
+        self.session.model_identity_format = Some(metadata.model_identity_format);
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.persist_session_best_effort("route selection");
@@ -119,13 +122,15 @@ impl Agent {
     ) -> Result<()> {
         crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model)?;
         let resolved_model = self.provider.model();
-        self.session.provider_key =
-            crate::provider::MultiProvider::session_provider_key_after_model_switch(
-                model,
-                self.provider.name(),
-                self.session.provider_key.as_deref(),
-            );
-        self.session.model = Some(resolved_model.clone());
+        let metadata = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
+            model,
+            self.provider.name(),
+            self.session.provider_key.as_deref(),
+        );
+        self.session.model = Some(metadata.model);
+        self.session.provider_key = metadata.provider_key;
+        self.session.route_api_method = metadata.route_api_method;
+        self.session.model_identity_format = Some(metadata.model_identity_format);
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.persist_session_best_effort("model selection");
@@ -205,6 +210,7 @@ impl Agent {
 
     pub fn set_session_provider_key(&mut self, provider_key: Option<String>) {
         self.session.provider_key = provider_key;
+        self.session.model_identity_format = Some(1);
     }
 
     pub fn rename_session_title(&mut self, title: Option<String>) -> Result<String> {

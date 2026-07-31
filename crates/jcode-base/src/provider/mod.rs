@@ -54,20 +54,20 @@ pub use catalog_routes::{
 pub use jcode_provider_core::attempt_tracker;
 pub use jcode_provider_core::cli_provider_arg_for_session_key;
 pub use jcode_provider_core::{
-    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, CHEAPNESS_REFERENCE_INPUT_TOKENS,
-    CHEAPNESS_REFERENCE_OUTPUT_TOKENS, CredentialMode, DEFAULT_CONTEXT_LIMIT, EventStream,
-    JCODE_USER_AGENT, ModelCapabilities, ModelCatalogRefreshSummary, ModelRoute,
-    ModelRouteApiMethod, NativeCompactionResult, NativeToolResult, NativeToolResultSender,
-    PremiumMode, Provider, RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence,
-    RouteCostSource, RouteSelection, RuntimeKey, dedupe_model_routes,
-    explicit_model_provider_prefix, fresh_transport_client, model_name_for_provider,
-    normalize_copilot_model_name, provider_from_model_key, shared_http_client,
-    summarize_model_catalog_refresh,
+    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, AuthRoute, CHATGPT_WEB_MODEL,
+    CHEAPNESS_REFERENCE_INPUT_TOKENS, CHEAPNESS_REFERENCE_OUTPUT_TOKENS, CredentialMode,
+    DEFAULT_CONTEXT_LIMIT, EventStream, JCODE_USER_AGENT, ModelCapabilities,
+    ModelCatalogRefreshSummary, ModelRoute, ModelRouteApiMethod, NativeCompactionResult,
+    NativeToolResult, NativeToolResultSender, PremiumMode, Provider, RouteBillingKind,
+    RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource, RouteSelection, RuntimeKey,
+    dedupe_model_routes, explicit_model_provider_prefix, fresh_transport_client,
+    model_name_for_provider, normalize_copilot_model_name, provider_from_model_key,
+    shared_http_client, summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{
-    FallbackPickOptions, error_looks_like_credential_failure, model_route_provider_labels_match,
-    normalize_model_route_provider_label, pick_next_fallback_route,
-    pick_next_fallback_route_with_options,
+    CanonicalModelIdentity, FallbackPickOptions, error_looks_like_credential_failure,
+    model_route_provider_labels_match, normalize_model_route_provider_label,
+    pick_next_fallback_route, pick_next_fallback_route_with_options,
 };
 pub use jcode_provider_core::{ProviderFailoverPrompt, parse_failover_prompt_message};
 pub use route_builders::{
@@ -404,6 +404,12 @@ struct RoutesMemoEntry {
     listable_models: Vec<String>,
 }
 
+enum CanonicalModelTarget {
+    BuiltIn(ActiveProvider),
+    OpenAiCompatible(crate::provider_catalog::OpenAiCompatibleProfile),
+    NamedProfile(String),
+}
+
 /// Process-wide route-catalog memo shared across `MultiProvider` instances.
 ///
 /// The shared server forks one `MultiProvider` per client connection, so a
@@ -487,6 +493,9 @@ impl MultiProvider {
             .cloned()
             .collect();
         compat_profiles.sort();
+        let mut configured_profiles: Vec<String> =
+            crate::config::config().providers.keys().cloned().collect();
+        configured_profiles.sort();
         let configured = [
             ("cl", self.claude_provider().is_some()),
             ("an", self.anthropic_provider().is_some()),
@@ -504,7 +513,7 @@ impl MultiProvider {
         .collect::<Vec<_>>()
         .join(",");
         format!(
-            "{}|{}|{}|{:?}|{}|{}|{}|{}",
+            "{}|{}|{}|{:?}|{}|{}|{}|{}|{}",
             // Scope by home so sandboxes (tests, JCODE_HOME switches) never
             // share catalogs that were built from different credential files.
             std::env::var("JCODE_HOME").unwrap_or_default(),
@@ -514,6 +523,7 @@ impl MultiProvider {
             profile,
             self.use_claude_cli,
             configured,
+            configured_profiles.join(","),
             compat_profiles.join(","),
         )
     }
@@ -859,48 +869,6 @@ impl MultiProvider {
         Some((profile, rest))
     }
 
-    /// Find the configured OpenAI-compatible profile that serves a bare model
-    /// id, using the live route catalog as the source of truth.
-    ///
-    /// Route specs from the picker carry a `<profile>:<model>` prefix, but
-    /// hand-typed `/model <id>` and saved sessions can carry the bare id. The
-    /// active profile wins when several profiles serve the same id, so a
-    /// re-select of the current model never silently hops endpoints.
-    fn openai_compatible_profile_owning_model(
-        &self,
-        model: &str,
-    ) -> Option<crate::provider_catalog::OpenAiCompatibleProfile> {
-        let model = model.trim();
-        if model.is_empty() {
-            return None;
-        }
-
-        let active_profile_id = ProviderRegistry::new(self).active_compatible_profile_id();
-        let mut fallback: Option<String> = None;
-        for route in self.fresh_routes_memo_entry().routes {
-            if !route.available || route.model != model {
-                continue;
-            }
-            let Some(profile_id) = route
-                .api_method
-                .strip_prefix("openai-compatible:")
-                .map(str::trim)
-                .filter(|profile_id| !profile_id.is_empty())
-            else {
-                continue;
-            };
-            if active_profile_id.as_deref() == Some(profile_id) {
-                fallback = Some(profile_id.to_string());
-                break;
-            }
-            if fallback.is_none() {
-                fallback = Some(profile_id.to_string());
-            }
-        }
-
-        crate::provider_catalog::openai_compatible_profile_by_id(&fallback?)
-    }
-
     /// Parse a `<name>:<model>` spec whose prefix is a user-defined named
     /// provider profile from config (`[providers.<name>]`). Built-in provider
     /// prefixes and catalog profile ids take precedence and never reach here.
@@ -920,6 +888,254 @@ impl MultiProvider {
             .providers
             .contains_key(prefix)
             .then(|| (prefix.to_string(), rest.to_string()))
+    }
+
+    /// Resolve the canonical `provider/model` form. The slash parser is
+    /// intentionally conservative: a slash-bearing provider-native model id
+    /// remains opaque unless its first component names a configured named
+    /// profile, a known OpenAI-compatible profile, or an initialized/configured
+    /// built-in provider.
+    fn canonical_provider_model_target(
+        &self,
+        model: &str,
+    ) -> Option<(CanonicalModelTarget, String)> {
+        let parsed = jcode_provider_core::parse_model_spec(model);
+        if parsed.separator != Some(jcode_provider_core::ModelSpecSeparator::Slash) {
+            return None;
+        }
+        let provider = parsed.provider.as_deref()?;
+
+        // Built-in provider ids take precedence over compatible-profile ids.
+        // `openrouter` exists in both namespaces, but `openrouter/model` is
+        // the canonical built-in route; the provider-native model remainder is
+        // still preserved after the first slash.
+        if let Some(built_in) = jcode_provider_core::parse_provider_hint(provider) {
+            return Some((CanonicalModelTarget::BuiltIn(built_in), parsed.model));
+        }
+
+        // Dual-auth aliases (anthropic-api, openai-api, claude-oauth, ...)
+        // are built-in provider identities even when a metadata profile happens
+        // to use a similar spelling.
+        if let Some(profile) = crate::provider_catalog::openai_compatible_profile_by_id(provider) {
+            return Some((
+                CanonicalModelTarget::OpenAiCompatible(profile),
+                parsed.model,
+            ));
+        }
+
+        let config = crate::config::config();
+        if let Some(profile_name) = config
+            .providers
+            .keys()
+            .find(|name| name.eq_ignore_ascii_case(provider))
+        {
+            return Some((
+                CanonicalModelTarget::NamedProfile((*profile_name).clone()),
+                parsed.model,
+            ));
+        }
+
+        None
+    }
+
+    /// Preserve an existing OpenRouter-native slash model id when it is already
+    /// present in the active route catalog. Otherwise the canonical provider
+    /// prefix is removed and the remainder is passed to the selected provider.
+    fn canonical_model_for_builtin_target(
+        &self,
+        target: ActiveProvider,
+        requested: &str,
+        remainder: &str,
+    ) -> String {
+        if target == ActiveProvider::OpenRouter
+            && self.fresh_routes_memo_entry().routes.iter().any(|route| {
+                route.available
+                    && route.model == requested
+                    && Self::route_provider_key(route).as_deref() == Some("openrouter")
+            })
+        {
+            requested.to_string()
+        } else {
+            remainder.to_string()
+        }
+    }
+
+    fn route_provider_key(route: &ModelRoute) -> Option<String> {
+        match route.api_method_kind() {
+            ModelRouteApiMethod::JcodeSubscription => Some("jcode".to_string()),
+            ModelRouteApiMethod::ClaudeOAuth | ModelRouteApiMethod::AnthropicApiKey => {
+                Some("claude".to_string())
+            }
+            ModelRouteApiMethod::OpenAIOAuth | ModelRouteApiMethod::OpenAIApiKey => {
+                Some("openai".to_string())
+            }
+            ModelRouteApiMethod::Other(method) if method == "chatgpt-web" => {
+                Some("openai".to_string())
+            }
+            ModelRouteApiMethod::OpenRouter => Some("openrouter".to_string()),
+            ModelRouteApiMethod::OpenAiCompatible {
+                profile_id: Some(profile_id),
+            } => Some(profile_id),
+            ModelRouteApiMethod::OpenAiCompatible { profile_id: None } => {
+                let provider = route.provider.trim();
+                let named_profile = crate::config::config()
+                    .providers
+                    .keys()
+                    .find(|name| name.eq_ignore_ascii_case(provider));
+                named_profile
+                    .cloned()
+                    .or_else(|| (!provider.is_empty()).then(|| "openai-compatible".to_string()))
+            }
+            ModelRouteApiMethod::Copilot => Some("copilot".to_string()),
+            ModelRouteApiMethod::Cursor => Some("cursor".to_string()),
+            ModelRouteApiMethod::Bedrock => Some("bedrock".to_string()),
+            ModelRouteApiMethod::CodeAssistOAuth => Some("gemini".to_string()),
+            ModelRouteApiMethod::AntigravityHttps => Some("antigravity".to_string()),
+            ModelRouteApiMethod::RemoteCatalog | ModelRouteApiMethod::Current => None,
+            ModelRouteApiMethod::Other(_) => {
+                let provider = route.provider.trim();
+                (!provider.is_empty()).then(|| provider.to_ascii_lowercase())
+            }
+        }
+    }
+
+    fn canonical_route_candidate(route: &ModelRoute) -> Option<String> {
+        let provider = Self::route_provider_key(route)?;
+        if provider == "openrouter" && route.model.starts_with("openrouter/") {
+            Some(route.model.clone())
+        } else {
+            Some(jcode_provider_core::format_provider_model(
+                &provider,
+                &route.model,
+            ))
+        }
+    }
+
+    fn active_routes_for_model(&self, model: &str) -> Vec<(String, ModelRoute)> {
+        let mut routes = self
+            .fresh_routes_memo_entry()
+            .routes
+            .into_iter()
+            .filter(|route| route.available && route.model == model)
+            .filter_map(|route| {
+                let candidate = Self::canonical_route_candidate(&route)?;
+                Some((candidate, route))
+            })
+            .collect::<Vec<_>>();
+        routes.sort_by(
+            |(left_candidate, left_route), (right_candidate, right_route)| {
+                left_candidate
+                    .cmp(right_candidate)
+                    .then_with(|| left_route.api_method.cmp(&right_route.api_method))
+                    .then_with(|| left_route.provider.cmp(&right_route.provider))
+            },
+        );
+        routes.dedup_by(|(left_candidate, _), (right_candidate, _)| {
+            left_candidate == right_candidate
+        });
+        routes
+    }
+
+    fn active_routes_for_provider_model(
+        &self,
+        provider: ActiveProvider,
+        model: &str,
+    ) -> Vec<ModelRoute> {
+        self.fresh_routes_memo_entry()
+            .routes
+            .into_iter()
+            .filter(|route| {
+                route.available
+                    && route.model == model
+                    && Self::route_provider_key(route).as_deref()
+                        == Some(Self::provider_key(provider))
+            })
+            .collect()
+    }
+
+    fn active_openrouter_route_for_model(&self, model: &str) -> Option<ModelRoute> {
+        self.fresh_routes_memo_entry()
+            .routes
+            .into_iter()
+            .find(|route| {
+                route.available
+                    && route.model == model
+                    && route.api_method_kind() == ModelRouteApiMethod::OpenRouter
+            })
+    }
+
+    fn ambiguous_model_error(model: &str, candidates: &[String]) -> anyhow::Error {
+        anyhow::anyhow!(
+            "Model '{}' is ambiguous across active provider routes: {}. Use a qualified provider/model value (for example, provider/model) to disambiguate.",
+            model,
+            candidates.join(", ")
+        )
+    }
+
+    fn set_model_on_route(&self, route: &ModelRoute) -> Result<()> {
+        // This helper is called by `set_model` after route identity has already
+        // been resolved. Do not feed the generated string back through
+        // `set_model`: that would re-enter bare-model resolution and turn a
+        // route that was already selected into a new ambiguity decision.
+        match route.api_method_kind() {
+            ModelRouteApiMethod::JcodeSubscription => {
+                self.set_model_on_provider(ActiveProvider::OpenRouter, &route.model)
+            }
+            // A bare route selects the provider identity, not a credential
+            // source. Keep dual-auth providers in Auto mode rather than
+            // pinning whichever credential happened to produce this route.
+            ModelRouteApiMethod::ClaudeOAuth | ModelRouteApiMethod::AnthropicApiKey => {
+                self.set_model_on_provider(ActiveProvider::Claude, &route.model)
+            }
+            ModelRouteApiMethod::OpenAIOAuth | ModelRouteApiMethod::OpenAIApiKey => {
+                self.set_model_on_provider(ActiveProvider::OpenAI, &route.model)
+            }
+            ModelRouteApiMethod::OpenAiCompatible {
+                profile_id: Some(profile_id),
+            } => {
+                if let Some(profile) =
+                    crate::provider_catalog::openai_compatible_profile_by_id(&profile_id)
+                {
+                    self.set_model_on_openai_compatible_profile(profile, &route.model)
+                } else if crate::config::config().providers.contains_key(&profile_id) {
+                    self.set_model_on_named_provider_profile(&profile_id, &route.model)
+                } else {
+                    anyhow::bail!(
+                        "Unknown OpenAI-compatible route provider '{}', cannot select model '{}'",
+                        profile_id,
+                        route.model
+                    )
+                }
+            }
+            ModelRouteApiMethod::OpenAiCompatible { profile_id: None } => {
+                self.set_model_on_provider(ActiveProvider::OpenRouter, &route.model)
+            }
+            ModelRouteApiMethod::OpenRouter => {
+                let model = openrouter_catalog_model_id(&route.model)
+                    .unwrap_or_else(|| route.model.clone());
+                self.set_model_on_provider(ActiveProvider::OpenRouter, &model)
+            }
+            ModelRouteApiMethod::Copilot => {
+                self.set_model_on_provider(ActiveProvider::Copilot, &route.model)
+            }
+            ModelRouteApiMethod::Cursor => {
+                self.set_model_on_provider(ActiveProvider::Cursor, &route.model)
+            }
+            ModelRouteApiMethod::Bedrock => {
+                self.set_model_on_provider(ActiveProvider::Bedrock, &route.model)
+            }
+            ModelRouteApiMethod::CodeAssistOAuth => {
+                self.set_model_on_provider(ActiveProvider::Gemini, &route.model)
+            }
+            ModelRouteApiMethod::AntigravityHttps => {
+                self.set_model_on_provider(ActiveProvider::Antigravity, &route.model)
+            }
+            ModelRouteApiMethod::RemoteCatalog
+            | ModelRouteApiMethod::Current
+            | ModelRouteApiMethod::Other(_) => {
+                self.set_model_on_provider(self.active_provider(), &route.model)
+            }
+        }
     }
 
     /// Bind (or reuse) the runtime for a named config provider profile and
@@ -1398,6 +1614,61 @@ impl MultiProvider {
             anyhow::bail!("Model cannot be empty");
         }
 
+        // Canonical defaults own provider selection. A matching legacy
+        // default_provider may still carry an auth-mode pin.
+        if jcode_provider_core::parse_model_spec(model).separator
+            == Some(jcode_provider_core::ModelSpecSeparator::Slash)
+            && let Some((target, remainder)) = self.canonical_provider_model_target(model)
+        {
+            let parsed = jcode_provider_core::parse_model_spec(model);
+            let model_provider = parsed.provider.as_deref().unwrap_or_default();
+            let matching_provider = default_provider.filter(|provider| {
+                crate::config::canonical_provider_identity(provider)
+                    .eq_ignore_ascii_case(model_provider)
+            });
+            let prefix = matching_provider.unwrap_or(model_provider);
+            let pinned = jcode_provider_core::AuthRoute::parse_explicit_credential_prefix(prefix);
+            let openai_credential_mode = pinned.and_then(|route| {
+                matches!(
+                    route.provider,
+                    jcode_provider_core::DualAuthProvider::OpenAI
+                )
+                .then(|| match route.mode {
+                    jcode_provider_core::AuthMode::ApiKey => openai::OpenAICredentialMode::ApiKey,
+                    jcode_provider_core::AuthMode::Oauth => openai::OpenAICredentialMode::OAuth,
+                })
+            });
+            let anthropic_credential_mode = pinned.and_then(|route| {
+                matches!(
+                    route.provider,
+                    jcode_provider_core::DualAuthProvider::Anthropic
+                )
+                .then(|| match route.mode {
+                    jcode_provider_core::AuthMode::ApiKey => {
+                        anthropic::AnthropicCredentialMode::ApiKey
+                    }
+                    jcode_provider_core::AuthMode::Oauth => {
+                        anthropic::AnthropicCredentialMode::OAuth
+                    }
+                })
+            });
+            return match target {
+                CanonicalModelTarget::BuiltIn(provider) => self
+                    .set_model_on_provider_with_credential_modes(
+                        provider,
+                        &remainder,
+                        openai_credential_mode,
+                        anthropic_credential_mode,
+                    ),
+                CanonicalModelTarget::OpenAiCompatible(profile) => {
+                    self.set_model_on_openai_compatible_profile(profile, &remainder)
+                }
+                CanonicalModelTarget::NamedProfile(profile_name) => {
+                    self.set_model_on_named_provider_profile(&profile_name, &remainder)
+                }
+            };
+        }
+
         // The model picker persists default_model as a full model spec that
         // may carry an explicit provider/credential prefix (e.g.
         // `claude-api:claude-fable-5`). Provider-local `set_model`
@@ -1868,11 +2139,45 @@ impl Provider for MultiProvider {
             return self.set_model_on_provider(target, target_model);
         }
 
+        // A canonical slash-qualified spec is exact: its left-hand side picks
+        // the provider identity and the remainder is passed to that provider
+        // without interpreting any later slashes.
+        if let Some((target, remainder)) = self.canonical_provider_model_target(requested_model) {
+            return match target {
+                CanonicalModelTarget::BuiltIn(provider) => {
+                    // A slash-bearing OpenRouter catalog id is historically
+                    // accepted as-is (for example `anthropic/claude-sonnet-4`).
+                    // Keep that compatibility only when the selected built-in
+                    // route is not active; an active native route wins for the
+                    // canonical provider/model form.
+                    let built_in_route_exists = !self
+                        .active_routes_for_provider_model(provider, &remainder)
+                        .is_empty();
+                    if !built_in_route_exists
+                        && let Some(route) = self.active_openrouter_route_for_model(requested_model)
+                    {
+                        return self.set_model_on_route(&route);
+                    }
+                    let selected = self.canonical_model_for_builtin_target(
+                        provider,
+                        requested_model,
+                        &remainder,
+                    );
+                    self.set_model_on_provider(provider, &selected)
+                }
+                CanonicalModelTarget::OpenAiCompatible(profile) => {
+                    self.set_model_on_openai_compatible_profile(profile, &remainder)
+                }
+                CanonicalModelTarget::NamedProfile(profile_name) => {
+                    self.set_model_on_named_provider_profile(&profile_name, &remainder)
+                }
+            };
+        }
+
         // A custom OpenAI-compatible endpoint owns opaque, provider-local model
-        // IDs. Keep unprefixed names on that active endpoint, even when they
-        // resemble a globally known model family. Picker and slash-command
-        // route specs carry explicit prefixes, so the branch above can switch
-        // to any configured provider at any time.
+        // IDs, including model ids containing `@`. This fallback intentionally
+        // comes after canonical slash dispatch so known provider/model values
+        // cannot be swallowed by the active compatible endpoint.
         if self.active_provider() == ActiveProvider::OpenRouter
             && self
                 .active_openrouter_execution_provider()
@@ -1881,15 +2186,11 @@ impl Provider for MultiProvider {
             return self.set_model_on_provider(ActiveProvider::OpenRouter, requested_model);
         }
 
-        // Normalize Copilot-style model names (dots -> hyphens) to canonical form.
-        // e.g. "claude-opus-4.6" -> "claude-opus-4-6" so Anthropic accepts it.
-        let model = if let Some(canonical) = normalize_copilot_model_name(requested_model) {
-            canonical
-        } else {
-            requested_model
-        };
-
-        if let Some((base_model, provider_pin)) = model.rsplit_once('@')
+        // Preserve the historical OpenRouter provider-pin form after the
+        // active direct endpoint has had a chance to claim its opaque model id.
+        // For example, `openai/gpt-5.5@OpenAI` is an OpenRouter model id plus an
+        // upstream provider pin, not a request for the native OpenAI runtime.
+        if let Some((base_model, provider_pin)) = requested_model.rsplit_once('@')
             && !provider_pin.trim().is_empty()
             && let Some(openrouter_model) = openrouter_catalog_model_id(base_model)
         {
@@ -1899,22 +2200,31 @@ impl Provider for MultiProvider {
             );
         }
 
-        // Detect which provider an unprefixed model belongs to.
-        let target_provider = provider_for_model(model);
-        if let Some(target_provider) = target_provider
-            && let Some(target) = provider_from_model_key(target_provider)
-        {
-            self.set_model_on_provider(target, model)
-        } else if let Some(profile) = self.openai_compatible_profile_owning_model(model) {
-            // Bare ids from an OpenAI-compatible catalog (`celeris-1`,
-            // `mimo-v2.5`, ...) match none of the built-in model-name
-            // heuristics. Without this, `/model <bare-id>` fell through to
-            // whichever provider happened to be active and failed with a
-            // misleading "not supported by <active provider>" error.
-            self.set_model_on_openai_compatible_profile(profile, model)
-        } else {
-            // Unknown model - try current provider.
-            self.set_model_on_provider(self.active_provider(), model)
+        // A bare id that is present in the active route catalog must identify
+        // one concrete route. Do not use provider-name heuristics or the active
+        // runtime to silently choose among multiple providers.
+        //
+        // Copilot historically surfaced dotted Claude model ids while the
+        // provider-native route uses hyphens. Normalize only for this exact
+        // route lookup; the normalized value is not a license to use static
+        // provider-family heuristics when no active route exists.
+        let model = normalize_copilot_model_name(requested_model).unwrap_or(requested_model);
+        let exact_routes = self.active_routes_for_model(model);
+        match exact_routes.as_slice() {
+            [(.., route)] => self.set_model_on_route(route),
+            [] => {
+                anyhow::bail!(
+                    "No active provider route for model '{}'. Choose an available model or use a qualified provider/model value.",
+                    requested_model
+                );
+            }
+            _ => {
+                let candidates = exact_routes
+                    .iter()
+                    .map(|(candidate, _)| candidate.clone())
+                    .collect::<Vec<_>>();
+                Err(Self::ambiguous_model_error(requested_model, &candidates))
+            }
         }
     }
 

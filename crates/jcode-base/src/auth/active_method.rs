@@ -172,8 +172,14 @@ mod tests {
 
     #[test]
     fn anthropic_none_when_unconfigured() {
+        let _env_guard = crate::storage::lock_test_env();
+        let previous_api_key = std::env::var_os("ANTHROPIC_API_KEY");
+        crate::env::remove_var("ANTHROPIC_API_KEY");
         let auth = anthropic(false, false);
         assert!(resolve_dual_credential_auth(ActiveProvider::Claude, &auth, None).is_none());
+        if let Some(previous_api_key) = previous_api_key {
+            crate::env::set_var("ANTHROPIC_API_KEY", previous_api_key);
+        }
     }
 
     #[test]

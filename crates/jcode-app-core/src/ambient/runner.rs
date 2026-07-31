@@ -421,6 +421,7 @@ impl AmbientRunnerHandle {
                 child.compaction = parent.compaction.clone();
                 child.provider_key = parent.provider_key.clone();
                 child.route_api_method = parent.route_api_method.clone();
+                child.model_identity_format = parent.model_identity_format;
                 child.model = parent.model.clone();
                 child.subagent_model = parent.subagent_model.clone();
                 child.improve_mode = parent.improve_mode;
@@ -432,6 +433,9 @@ impl AmbientRunnerHandle {
                 child.memory_injections = parent.memory_injections.clone();
                 child.replay_events = parent.replay_events.clone();
                 child.working_dir = item.working_dir.clone().or(parent.working_dir.clone());
+                if child.model_identity_format.is_none() {
+                    child.model_identity_format = Some(1);
+                }
                 child
             }
             Err(err) => {
@@ -448,6 +452,7 @@ impl AmbientRunnerHandle {
                     ),
                 );
                 child.working_dir = item.working_dir.clone();
+                child.model_identity_format = Some(1);
                 child
             }
         };

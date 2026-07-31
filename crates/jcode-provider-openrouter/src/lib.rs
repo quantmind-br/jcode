@@ -334,16 +334,6 @@ fn sanitize_cache_namespace(raw: &str) -> String {
     }
 }
 
-fn configured_cache_namespace() -> String {
-    let raw = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| DEFAULT_CACHE_NAMESPACE.to_string());
-
-    sanitize_cache_namespace(&raw)
-}
-
 fn cache_path_for_namespace(namespace: &str) -> PathBuf {
     let namespace = sanitize_cache_namespace(namespace);
     if let Ok(path) = std::env::var("JCODE_HOME") {
@@ -360,7 +350,10 @@ fn cache_path_for_namespace(namespace: &str) -> PathBuf {
 }
 
 fn cache_path() -> PathBuf {
-    cache_path_for_namespace(&configured_cache_namespace())
+    // Public OpenRouter catalog helpers must never follow the process-global
+    // compatibility-profile selector.  Named/built-in profiles use the
+    // explicit namespace APIs below.
+    cache_path_for_namespace(DEFAULT_CACHE_NAMESPACE)
 }
 
 fn disk_cache_modified_at(path: &PathBuf) -> Option<SystemTime> {
@@ -412,12 +405,29 @@ pub fn load_disk_cache_entry_for_namespace(namespace: &str) -> Option<DiskCache>
     load_disk_cache_entry_from_path(cache_path_for_namespace(namespace))
 }
 
+/// Load a model catalog from an explicitly selected namespace.  Callers that
+/// own a provider/profile identity should use this instead of the historical
+/// env-selected helpers; the latter are retained for compatibility only.
+pub fn load_disk_cache_for_namespace(namespace: &str) -> Option<Vec<ModelInfo>> {
+    load_disk_cache_entry_for_namespace(namespace).map(|cache| cache.models)
+}
+
 pub fn load_disk_cache() -> Option<Vec<ModelInfo>> {
     load_disk_cache_entry().map(|cache| cache.models)
 }
 
 pub fn load_model_pricing_disk_cache_public(model_id: &str) -> Option<ModelPricing> {
     load_disk_cache()?
+        .into_iter()
+        .find(|model| model.id == model_id)
+        .map(|model| model.pricing)
+}
+
+pub fn load_model_pricing_disk_cache_for_namespace(
+    namespace: &str,
+    model_id: &str,
+) -> Option<ModelPricing> {
+    load_disk_cache_for_namespace(namespace)?
         .into_iter()
         .find(|model| model.id == model_id)
         .map(|model| model.pricing)
@@ -551,18 +561,32 @@ fn save_disk_cache_with_source_to_path(
     }
 }
 
-fn endpoints_cache_path(model: &str) -> PathBuf {
+fn endpoints_cache_path_for_namespace(namespace: &str, model: &str) -> PathBuf {
     let safe_name = model.replace('/', "__");
-    let namespace = configured_cache_namespace();
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".jcode")
-        .join("cache")
-        .join(format!("{}_endpoints_{}.json", namespace, safe_name))
+    let root = std::env::var("JCODE_HOME")
+        .map(PathBuf::from)
+        .map(|path| path.join("cache"))
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".jcode")
+                .join("cache")
+        });
+    root.join(format!(
+        "{}_endpoints_{}.json",
+        sanitize_cache_namespace(namespace),
+        safe_name
+    ))
 }
 
-pub fn load_endpoints_disk_cache_public(model: &str) -> Option<(Vec<EndpointInfo>, u64)> {
-    let path = endpoints_cache_path(model);
+pub fn load_endpoints_disk_cache_for_namespace_public(
+    namespace: &str,
+    model: &str,
+) -> Option<(Vec<EndpointInfo>, u64)> {
+    load_endpoints_disk_cache_public_from_path(endpoints_cache_path_for_namespace(namespace, model))
+}
+
+fn load_endpoints_disk_cache_public_from_path(path: PathBuf) -> Option<(Vec<EndpointInfo>, u64)> {
     let modified_at = disk_cache_modified_at(&path);
     let cache = if let Ok(memo) = ENDPOINTS_DISK_CACHE_MEMO.lock()
         && let Some(entry) = memo.get(&path)
@@ -587,16 +611,26 @@ pub fn load_endpoints_disk_cache_public(model: &str) -> Option<(Vec<EndpointInfo
     if cache.endpoints.is_empty() {
         return None;
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    let age = now.saturating_sub(cache.cached_at);
-    Some((cache.endpoints, age))
+    let now = current_unix_secs()?;
+    Some((cache.endpoints, now.saturating_sub(cache.cached_at)))
+}
+
+pub fn load_endpoints_disk_cache_public(model: &str) -> Option<(Vec<EndpointInfo>, u64)> {
+    load_endpoints_disk_cache_public_from_path(endpoints_cache_path_for_namespace(
+        DEFAULT_CACHE_NAMESPACE,
+        model,
+    ))
+}
+
+pub fn load_endpoints_disk_cache_for_namespace(
+    namespace: &str,
+    model: &str,
+) -> Option<Vec<EndpointInfo>> {
+    load_endpoints_disk_cache_for_namespace_public(namespace, model).map(|(endpoints, _)| endpoints)
 }
 
 pub fn load_endpoints_disk_cache(model: &str) -> Option<Vec<EndpointInfo>> {
-    let path = endpoints_cache_path(model);
+    let path = endpoints_cache_path_for_namespace(DEFAULT_CACHE_NAMESPACE, model);
     let modified_at = disk_cache_modified_at(&path);
     let cache = if let Ok(memo) = ENDPOINTS_DISK_CACHE_MEMO.lock()
         && let Some(entry) = memo.get(&path)
@@ -630,7 +664,15 @@ pub fn load_endpoints_disk_cache(model: &str) -> Option<Vec<EndpointInfo>> {
 }
 
 pub fn save_endpoints_disk_cache(model: &str, endpoints: &[EndpointInfo]) {
-    let path = endpoints_cache_path(model);
+    save_endpoints_disk_cache_for_namespace(DEFAULT_CACHE_NAMESPACE, model, endpoints);
+}
+
+pub fn save_endpoints_disk_cache_for_namespace(
+    namespace: &str,
+    model: &str,
+    endpoints: &[EndpointInfo],
+) {
+    let path = endpoints_cache_path_for_namespace(namespace, model);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

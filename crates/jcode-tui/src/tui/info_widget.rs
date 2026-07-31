@@ -291,7 +291,6 @@ pub struct BackgroundInfo {
     /// Memory agent turn count
     pub memory_agent_turns: usize,
 }
-
 /// Which provider the usage info is for
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UsageProvider {
@@ -318,7 +317,6 @@ impl UsageProvider {
         }
     }
 }
-
 /// Authentication method used to access the model
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AuthMethod {
@@ -343,7 +341,6 @@ pub enum AuthMethod {
     /// Google Gemini OAuth
     GeminiOAuth,
 }
-
 /// Subscription usage info for the info widget
 #[derive(Debug, Default, Clone)]
 pub struct UsageInfo {
@@ -367,6 +364,9 @@ pub struct UsageInfo {
     pub spark_resets_at: Option<String>,
     /// Total cost in USD - for API-key providers (OpenRouter, direct API key)
     pub total_cost: f32,
+    /// Canonical provider source label (e.g. "openrouter") so cost/usage overlays
+    /// do not conflate homonymous models from different origins.
+    pub source_label: Option<String>,
     /// Input tokens used - for cost calculation
     pub input_tokens: u64,
     /// Output tokens used - for cost calculation

@@ -818,11 +818,13 @@ impl Provider for ClaudeProvider {
 
     async fn prefetch_models(&self) -> Result<()> {
         let creds = claude_auth::load_credentials().context("Failed to load Claude credentials")?;
+        let active_label =
+            claude_auth::active_account_label().unwrap_or_else(claude_auth::primary_account_label);
+        let context_scope =
+            jcode_base::provider::models::anthropic_context_scope_for_account(Some(&active_label));
         let now = chrono::Utc::now().timestamp_millis();
 
         let access_token = if creds.expires_at < now + 300_000 && !creds.refresh_token.is_empty() {
-            let active_label = claude_auth::active_account_label()
-                .unwrap_or_else(claude_auth::primary_account_label);
             match oauth::refresh_claude_tokens_for_account(&creds.refresh_token, &active_label)
                 .await
             {
@@ -843,7 +845,10 @@ impl Provider for ClaudeProvider {
             Ok(catalog) => {
                 jcode_base::provider::persist_anthropic_model_catalog(&catalog);
                 if !catalog.context_limits.is_empty() {
-                    jcode_base::provider::populate_context_limits(catalog.context_limits);
+                    jcode_base::provider::models::populate_context_limits_for_provider(
+                        &context_scope,
+                        catalog.context_limits,
+                    );
                 }
                 if !catalog.available_models.is_empty() {
                     jcode_base::provider::populate_anthropic_models(catalog.available_models);

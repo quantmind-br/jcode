@@ -277,7 +277,7 @@ async fn handle_get_model_catalog_does_not_wait_for_busy_agent_lock() {
             assert_eq!(id, 43);
             assert_eq!(returned_session_id, session_id);
             assert_eq!(provider_name.as_deref(), Some("mock"));
-            assert_eq!(provider_model.as_deref(), Some("persisted-model"));
+            assert_eq!(provider_model.as_deref(), Some("mock/persisted-model"));
         }
         other => panic!("expected history event, got {:?}", other),
     }

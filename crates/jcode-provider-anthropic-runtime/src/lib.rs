@@ -422,6 +422,9 @@ impl AnthropicProvider {
     /// live `GET /v1/models` endpoint works and that the model under test is in
     /// the live catalog.
     pub async fn fetch_live_model_ids_for_doctor(&self) -> Result<Vec<String>> {
+        let context_scope = jcode_base::provider::models::anthropic_context_scope_for_account(
+            auth::claude::active_account_label().as_deref(),
+        );
         let (token, is_oauth) = self.get_access_token().await?;
         if token.trim().is_empty() {
             anyhow::bail!("resolved an empty Anthropic access token");
@@ -435,7 +438,10 @@ impl AnthropicProvider {
         // exactly like the runtime's own prefetch.
         jcode_base::provider::persist_anthropic_model_catalog(&catalog);
         if !catalog.context_limits.is_empty() {
-            jcode_base::provider::populate_context_limits(catalog.context_limits.clone());
+            jcode_base::provider::models::populate_context_limits_for_provider(
+                &context_scope,
+                catalog.context_limits.clone(),
+            );
         }
         if !catalog.available_models.is_empty() {
             jcode_base::provider::populate_anthropic_models(catalog.available_models.clone());
@@ -1276,6 +1282,9 @@ impl Provider for AnthropicProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
+        let context_scope = jcode_base::provider::models::anthropic_context_scope_for_account(
+            auth::claude::active_account_label().as_deref(),
+        );
         let (token, is_oauth) = self.get_access_token().await?;
         if token.trim().is_empty() {
             return Ok(());
@@ -1311,7 +1320,10 @@ impl Provider for AnthropicProvider {
         };
         jcode_base::provider::persist_anthropic_model_catalog(&catalog);
         if !catalog.context_limits.is_empty() {
-            jcode_base::provider::populate_context_limits(catalog.context_limits);
+            jcode_base::provider::models::populate_context_limits_for_provider(
+                &context_scope,
+                catalog.context_limits,
+            );
         }
         if !catalog.available_models.is_empty() {
             jcode_base::provider::populate_anthropic_models(catalog.available_models);

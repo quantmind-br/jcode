@@ -82,6 +82,25 @@ impl ResolvedTokenPricing {
 
 /// Update cost calculation based on token usage (for API-key providers)
 impl App {
+    /// Resolve billing and pricing identity from the session's durable route.
+    ///
+    /// This is intentionally independent of display labels and process
+    /// environment. Legacy sessions that predate route metadata return `None`
+    /// and are handled by the compatibility fallbacks at their call sites.
+    pub(crate) fn active_route_source_identity(
+        &self,
+    ) -> Option<crate::provider_activity::RouteSourceIdentity> {
+        let canonical_identity =
+            crate::tui::app::model_context::model_route_metadata::canonical_session_provider_model_identity(
+                self,
+            );
+        crate::provider_activity::source_identity_for_route_metadata(
+            self.session.provider_key.as_deref(),
+            self.session.route_api_method.as_deref(),
+            (!canonical_identity.is_empty()).then_some(canonical_identity.as_str()),
+        )
+    }
+
     pub(super) fn current_streaming_tps_elapsed(&self) -> Duration {
         let mut elapsed = self.streaming.streaming_tps_elapsed;
         if let Some(start) = self.streaming.streaming_tps_start {
@@ -157,6 +176,7 @@ impl App {
 
     pub(super) fn update_cost_impl(&mut self) {
         let provider_name = self.provider.name().to_lowercase();
+        let route_source = self.active_route_source_identity();
         let runtime_provider = active_runtime_provider_key();
         let auth_status = crate::auth::AuthStatus::check_fast();
 
@@ -179,11 +199,36 @@ impl App {
         let is_explicit_openai_oauth =
             matches!(pinned_openai, Some(jcode_provider_core::AuthMode::Oauth));
 
-        let is_anthropic = provider_name.contains("anthropic") || provider_name.contains("claude");
-        let is_openai = provider_name.contains("openai");
+        let is_anthropic = route_source
+            .as_ref()
+            .map(|source| source.is_anthropic)
+            .unwrap_or_else(|| {
+                provider_name.contains("anthropic") || provider_name.contains("claude")
+            });
+        let is_openai = route_source
+            .as_ref()
+            .map(|source| source.is_openai)
+            .unwrap_or_else(|| provider_name.contains("openai"));
 
         // Whether the user is billed per token for this turn (direct API key).
-        let billed_per_token = if provider_name.contains("openrouter") {
+        let billed_per_token = if let Some(source) = route_source.as_ref() {
+            if source.is_anthropic || source.is_openai {
+                match self
+                    .session
+                    .route_api_method
+                    .as_deref()
+                    .and_then(jcode_provider_core::AuthRoute::parse)
+                {
+                    Some(route) => matches!(route.mode, jcode_provider_core::AuthMode::ApiKey),
+                    None if source.is_anthropic => {
+                        auth_status.anthropic.has_api_key && !auth_status.anthropic.has_oauth
+                    }
+                    None => auth_status.openai_has_api_key && !auth_status.openai_has_oauth,
+                }
+            } else {
+                source.is_metered
+            }
+        } else if provider_name.contains("openrouter") {
             crate::provider::openrouter::OpenRouterTransportState::from_current_env(
                 runtime_provider.as_deref(),
             )
@@ -213,7 +258,14 @@ impl App {
         }
 
         let model = self.provider.model().to_string();
-        self.refresh_cached_pricing(&model, is_anthropic, is_openai);
+        self.refresh_cached_pricing(
+            &model,
+            is_anthropic,
+            is_openai,
+            route_source
+                .as_ref()
+                .map(|source| source.source_key.as_str()),
+        );
 
         // Pricing in $/1M tokens. Anthropic resolves real per-model pricing in
         // refresh_cached_pricing; other providers fall back to the generic
@@ -318,10 +370,16 @@ impl App {
             return;
         }
         use crate::tui::TuiState;
-        let label = <Self as TuiState>::provider_name(self);
-        let runtime = active_runtime_provider_key();
-        let source_key =
-            crate::provider_activity::source_key_for_provider_label(&label, runtime.as_deref());
+        let source_key = self
+            .active_route_source_identity()
+            .map(|source| source.source_key)
+            .unwrap_or_else(|| {
+                // Explicit legacy fallback for sessions saved before durable
+                // route metadata was introduced.
+                let label = <Self as TuiState>::provider_name(self);
+                let runtime = active_runtime_provider_key();
+                crate::provider_activity::source_key_for_provider_label(&label, runtime.as_deref())
+            });
         let cost = call_cost as f64;
         // Ledger writes hit the filesystem; never block the render/input loop.
         std::thread::spawn(move || {
@@ -341,8 +399,17 @@ impl App {
 
         let model = <Self as TuiState>::provider_model(self);
         let provider_name = <Self as TuiState>::provider_name(self).to_lowercase();
-        let is_anthropic = provider_name.contains("anthropic") || provider_name.contains("claude");
-        let is_openai = provider_name.contains("openai");
+        let route_source = self.active_route_source_identity();
+        let is_anthropic = route_source
+            .as_ref()
+            .map(|source| source.is_anthropic)
+            .unwrap_or_else(|| {
+                provider_name.contains("anthropic") || provider_name.contains("claude")
+            });
+        let is_openai = route_source
+            .as_ref()
+            .map(|source| source.is_openai)
+            .unwrap_or_else(|| provider_name.contains("openai"));
 
         // The server resolves the active credential authoritatively; only bill
         // when it is an API key (OAuth subscriptions are not metered per token).
@@ -354,7 +421,9 @@ impl App {
         // For dual-auth providers (Anthropic/OpenAI) we require an API-key
         // credential. Other cost-based providers (OpenCode, OpenRouter direct,
         // bedrock-style API-key profiles) always meter per token when remote.
-        let billed = if is_anthropic || is_openai {
+        let billed = if let Some(source) = route_source.as_ref() {
+            source.is_metered && (!is_anthropic && !is_openai || api_key_billed)
+        } else if is_anthropic || is_openai {
             api_key_billed
         } else {
             // Providers that are inherently cost-based when proxied remotely.
@@ -368,7 +437,14 @@ impl App {
             return None;
         }
 
-        self.refresh_cached_pricing(&model, is_anthropic, is_openai);
+        self.refresh_cached_pricing(
+            &model,
+            is_anthropic,
+            is_openai,
+            route_source
+                .as_ref()
+                .map(|source| source.source_key.as_str()),
+        );
         Some(ResolvedTokenPricing {
             prompt_price: *self.cost.cached_prompt_price.get_or_insert(15.0),
             completion_price: *self.cost.cached_completion_price.get_or_insert(60.0),
@@ -384,19 +460,33 @@ impl App {
     /// service tier (`/fast on` priority, OpenAI flex), which changes
     /// per-token rates on premium models. Re-resolves when the model or tier
     /// changes.
-    fn refresh_cached_pricing(&mut self, model: &str, is_anthropic: bool, is_openai: bool) {
+    fn refresh_cached_pricing(
+        &mut self,
+        model: &str,
+        is_anthropic: bool,
+        is_openai: bool,
+        route_source_key: Option<&str>,
+    ) {
         let service_tier = self.active_service_tier_for_pricing();
-        // Tier is part of the memo key so toggling `/fast on` re-prices.
+        // Canonical provider/model identity is part of the memo key so two
+        // providers exposing the same short model id cannot reuse each other's
+        // pricing or context state.
+        let canonical_identity =
+            crate::tui::app::model_context::model_route_metadata::canonical_session_provider_model_identity(
+                self,
+            );
         let price_key = match service_tier.as_deref() {
-            Some(tier) => format!("{model}|{tier}"),
-            None => model.to_string(),
+            Some(tier) => format!("{canonical_identity}|{tier}"),
+            None => canonical_identity,
         };
         if self.cost.cached_price_model.as_deref() == Some(price_key.as_str()) {
             return;
         }
 
         let per_mtok = |micros: Option<u64>| micros.map(|m| m as f32 / 1_000_000.0);
-        let source_key = if is_anthropic {
+        let source_key = if let Some(source_key) = route_source_key {
+            source_key.to_string()
+        } else if is_anthropic {
             "claude:api-key".to_string()
         } else if is_openai {
             "openai:api-key".to_string()

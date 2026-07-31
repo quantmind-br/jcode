@@ -21,6 +21,10 @@ pub fn enter_selfdev_session(
                 child.model = parent.model.clone();
                 child.provider_key = parent.provider_key.clone();
                 child.route_api_method = parent.route_api_method.clone();
+                child.model_identity_format = parent.model_identity_format;
+                if child.model_identity_format.is_none() {
+                    child.model_identity_format = Some(1);
+                }
                 child.subagent_model = parent.subagent_model.clone();
                 child.improve_mode = parent.improve_mode;
                 child.autoreview_enabled = parent.autoreview_enabled;
@@ -41,6 +45,9 @@ pub fn enter_selfdev_session(
     } else {
         session::Session::create(None, Some("Self-development session".to_string()))
     };
+    if session.model_identity_format.is_none() {
+        session.model_identity_format = Some(1);
+    }
     session.set_canary("self-dev");
     session.working_dir = Some(repo_dir.display().to_string());
     session.status = session::SessionStatus::Closed;

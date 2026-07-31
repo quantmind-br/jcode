@@ -638,7 +638,7 @@ impl Provider for OpenRouterProvider {
         if self.supports_provider_features {
             // Also prefetch endpoints for the current model so preferred_provider() works immediately.
             let model = self.model();
-            if load_endpoints_disk_cache(&model).is_none() {
+            if self.load_endpoint_cache(&model).is_none() {
                 let _ = self.fetch_endpoints(&model).await;
             }
         }
@@ -668,7 +668,7 @@ impl Provider for OpenRouterProvider {
             }
 
             for model in refreshed_models.iter().map(|info| info.id.clone()) {
-                if load_endpoints_disk_cache_public(&model).is_some() {
+                if self.load_endpoint_cache_public(&model).is_some() {
                     push_target(&mut targets, &mut seen, model);
                 }
                 if targets.len() >= 24 {
@@ -739,7 +739,11 @@ impl Provider for OpenRouterProvider {
         {
             return limit;
         }
-        jcode_provider_core::context_limit_for_model_with_provider(&model_id, Some(self.name()))
+        // `name()` is the shared transport key (`openrouter`) even for a
+        // named compatible profile.  Use the profile id for the capability
+        // cache so two profiles serving the same opaque model cannot collide.
+        let provider_scope = self.profile_id.as_deref().unwrap_or(self.name());
+        jcode_base::provider::context_limit_for_model_with_provider(&model_id, Some(provider_scope))
             .unwrap_or(jcode_provider_core::DEFAULT_CONTEXT_LIMIT)
     }
 
@@ -778,22 +782,12 @@ impl Provider for OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
-    /// The disk-cache namespace this provider's *foreground* catalog reads and
-    /// writes should use.
-    ///
-    /// Every `new_named_openai_compatible()` constructor sets the process-global
-    /// `JCODE_OPENROUTER_CACHE_NAMESPACE` env var, so with several named
-    /// profiles in one process the last one constructed wins and all profiles
-    /// collide on a single `<last-profile>_models.json`. The background refresh
-    /// path already passes an explicit namespace; the foreground paths did not.
-    /// See issue #607.
-    ///
-    /// Standard/direct OpenRouter and built-in profiles keep the existing
-    /// env-var-driven `cache_path()` semantics.
+    /// Compatibility view retained for existing tests/callers. Cache reads no
+    /// longer depend on this optional value or on the process environment;
+    /// [`OpenRouterProvider::cache_namespace`] is the authoritative identity.
+    #[cfg(test)]
     pub(crate) fn foreground_cache_namespace(&self) -> Option<String> {
-        self.is_user_named_profile()
-            .then(|| self.profile_id.clone())
-            .flatten()
+        self.profile_id.clone()
     }
 
     /// The disk cache entry usable for this provider, i.e. its own namespace
@@ -810,12 +804,7 @@ impl OpenRouterProvider {
     pub(crate) fn load_disk_cache_entry_for_this_profile(
         &self,
     ) -> Option<jcode_provider_openrouter::DiskCache> {
-        match self.foreground_cache_namespace() {
-            Some(namespace) => {
-                jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&namespace)
-            }
-            None => jcode_provider_openrouter::load_disk_cache_entry(),
-        }
+        jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&self.cache_namespace())
     }
 
     /// True when this instance was built from a user-declared

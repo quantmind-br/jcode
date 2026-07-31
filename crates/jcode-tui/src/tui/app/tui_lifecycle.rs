@@ -37,7 +37,6 @@ impl App {
         self.set_split_view_enabled(restored.split_view_enabled, restored.split_view_enabled);
         self.set_todos_view_enabled(restored.todos_view_enabled, restored.todos_view_enabled);
         self.todo_confidence_spike_challenged = restored.todo_confidence_spike_challenged;
-
         let mut queued_messages = restored.queued_messages;
         let mut recovered_followups = Vec::new();
         if let Some(interleave_message) = restored.interleave_message
@@ -61,7 +60,6 @@ impl App {
             queued_messages = recovered_queue;
             self.set_status_notice("Recovered pending prompts after reload");
         }
-
         self.queued_messages = queued_messages;
         if self.has_queued_followups() {
             if self.is_remote {
@@ -636,6 +634,7 @@ impl App {
             model_picker_load_request_id: 0,
             pending_model_switch: None,
             pending_route_selection: None,
+            remote_model_switch_route_selection: None,
             pending_reasoning_effort: None,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
@@ -1075,6 +1074,7 @@ impl App {
             model_picker_load_request_id: 0,
             pending_model_switch: None,
             pending_route_selection: None,
+            remote_model_switch_route_selection: None,
             pending_reasoning_effort: None,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,

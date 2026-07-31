@@ -23,9 +23,22 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
             )])]
         }
         UsageProvider::CostBased => {
+            let source = info
+                .source_label
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| info.provider.label());
             vec![
                 Line::from(vec![
                     Span::styled("💰 ", Style::default().fg(rgb(140, 180, 255))),
+                    if source.is_empty() {
+                        Span::styled(String::new(), Style::default())
+                    } else {
+                        Span::styled(
+                            format!("{} ", source),
+                            Style::default().fg(rgb(140, 140, 150)),
+                        )
+                    },
                     Span::styled(
                         format!("${:.4}", info.total_cost),
                         Style::default().fg(rgb(180, 180, 190)).bold(),
@@ -110,13 +123,29 @@ pub(super) fn render_usage_compact(info: &UsageInfo, width: u16) -> Vec<Line<'st
     }
 
     if matches!(info.provider, UsageProvider::CostBased) {
-        return vec![Line::from(vec![Span::styled(
+        let source = info
+            .source_label
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| info.provider.label());
+        let text = if source.is_empty() {
             format!(
                 "${:.4} · {} in + {} out",
                 info.total_cost,
                 format_tokens(info.input_tokens),
                 format_tokens(info.output_tokens)
-            ),
+            )
+        } else {
+            format!(
+                "{} ${:.4} · {} in + {} out",
+                source,
+                info.total_cost,
+                format_tokens(info.input_tokens),
+                format_tokens(info.output_tokens)
+            )
+        };
+        return vec![Line::from(vec![Span::styled(
+            text,
             Style::default().fg(rgb(140, 140, 150)),
         )])];
     }
@@ -298,6 +327,86 @@ mod tests {
         assert!(!text.contains("5-hour"));
         assert!(!text.contains("Weekly"));
         assert_eq!(lines.len(), 2); // Provider label plus one quota bar.
+    }
+
+    #[test]
+    fn cost_based_usage_compact_shows_provider_source_label() {
+        let info = UsageInfo {
+            provider: UsageProvider::CostBased,
+            total_cost: 1.2345,
+            source_label: Some("openrouter".to_string()),
+            input_tokens: 1000,
+            output_tokens: 200,
+            available: true,
+            ..Default::default()
+        };
+
+        let lines = render_usage_compact(&info, 40);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(text.contains("openrouter"));
+        assert!(text.contains("$1.2345"));
+        assert!(text.contains("1.0K in + 200 out"));
+    }
+
+    #[test]
+    fn cost_based_usage_compact_keeps_narrow_width_with_source_label() {
+        let info = UsageInfo {
+            provider: UsageProvider::CostBased,
+            total_cost: 0.05,
+            source_label: Some("o".to_string()),
+            input_tokens: 0,
+            output_tokens: 0,
+            available: true,
+            ..Default::default()
+        };
+
+        let lines = render_usage_compact(&info, 24);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(text.contains("o $0.0500"));
+        assert!(UnicodeWidthStr::width(text.as_str()) <= 24);
+    }
+
+    #[test]
+    fn cost_based_usage_widget_includes_source_label_on_cost_line() {
+        let data = InfoWidgetData {
+            usage_info: Some(UsageInfo {
+                provider: UsageProvider::CostBased,
+                total_cost: 0.42,
+                source_label: Some("openai".to_string()),
+                input_tokens: 500,
+                output_tokens: 100,
+                available: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let lines = render_usage_widget(&data, Rect::new(0, 0, 30, 10));
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(text.contains("openai"));
+        assert!(text.contains("$0.4200"));
+        assert!(text.contains("500 in + 100 out"));
+    }
+
+    #[test]
+    fn cost_based_usage_compact_falls_back_to_provider_label_when_source_missing() {
+        let info = UsageInfo {
+            provider: UsageProvider::CostBased,
+            total_cost: 0.01,
+            input_tokens: 10,
+            output_tokens: 5,
+            available: true,
+            ..Default::default()
+        };
+
+        let lines = render_usage_compact(&info, 30);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(text.contains("$0.0100"));
+        assert!(text.contains("10 in + 5 out"));
     }
 }
 

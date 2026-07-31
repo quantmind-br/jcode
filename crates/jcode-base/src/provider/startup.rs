@@ -318,9 +318,9 @@ impl MultiProvider {
         };
 
         if let Some(model) = provider_state.default_model() {
-            if let Err(e) =
-                result.set_config_default_model(model, provider_state.default_provider_key())
-            {
+            let apply_result =
+                result.set_config_default_model(model, provider_state.default_provider_key());
+            if let Err(e) = apply_result {
                 crate::logging::warn(&format!(
                     "Failed to apply default_model '{}' from config: {}",
                     model, e

@@ -384,7 +384,10 @@ fn prepare_visible_spawn_session_persists_and_launches_provider_key_for_openrout
 
     assert!(launched);
     let session = crate::session::Session::load(&session_id).expect("prepared session should save");
-    assert_eq!(session.model.as_deref(), Some("openai/gpt-5.4@OpenAI"));
+    assert_eq!(
+        session.model.as_deref(),
+        Some("openrouter/openai/gpt-5.4@OpenAI")
+    );
     assert_eq!(session.provider_key.as_deref(), Some("openrouter"));
 
     crate::env::remove_var("JCODE_HOME");
@@ -411,7 +414,7 @@ fn prepare_visible_spawn_session_persists_requested_effort() {
 
     assert!(launched);
     let session = crate::session::Session::load(&session_id).expect("prepared session should save");
-    assert_eq!(session.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(session.model.as_deref(), Some("openai/gpt-5.5"));
     assert_eq!(
         session.reasoning_effort.as_deref(),
         Some("low"),
@@ -445,7 +448,7 @@ fn prepare_visible_spawn_session_prefers_parent_provider_key_over_model_guess() 
 
     assert!(launched);
     let session = crate::session::Session::load(&session_id).expect("prepared session should save");
-    assert_eq!(session.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(session.model.as_deref(), Some("ollama/gpt-5.4"));
     assert_eq!(session.provider_key.as_deref(), Some("ollama"));
 
     crate::env::remove_var("JCODE_HOME");
@@ -741,6 +744,7 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
     session.model = Some("claude-opus-4-6".to_string());
     session.provider_key = Some("claude-api".to_string());
     session.route_api_method = Some("claude-api".to_string());
+    session.model_identity_format = Some(1);
     session.save().expect("persist coordinator session");
 
     // Hold the agent lock to simulate a coordinator mid-turn: the spawn path
@@ -753,7 +757,7 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
         .insert("coord_busy".to_string(), Arc::clone(&agent));
 
     let identity = resolve_coordinator_spawn_identity("coord_busy", &sessions).await;
-    assert_eq!(identity.model.as_deref(), Some("claude-opus-4-6"));
+    assert_eq!(identity.model.as_deref(), Some("claude/claude-opus-4-6"));
     assert_eq!(identity.provider_key.as_deref(), Some("claude-api"));
     assert_eq!(identity.route_api_method.as_deref(), Some("claude-api"));
 

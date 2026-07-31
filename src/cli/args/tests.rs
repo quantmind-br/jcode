@@ -438,6 +438,24 @@ fn login_openai_compatible_accepts_global_provider_and_model_after_subcommand() 
 }
 
 #[test]
+fn model_flag_preserves_canonical_provider_model_text() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "--provider",
+        "openai-compatible",
+        "--model",
+        "my-gateway/vendor/model/with/slashes",
+        "run",
+        "hello",
+    ])
+    .expect("canonical model should parse");
+    assert_eq!(
+        args.model.as_deref(),
+        Some("my-gateway/vendor/model/with/slashes")
+    );
+}
+
+#[test]
 fn login_scriptable_flags_parse() {
     let args = Args::try_parse_from(["jcode", "login", "--print-auth-url", "--json"]).unwrap();
     match args.command {

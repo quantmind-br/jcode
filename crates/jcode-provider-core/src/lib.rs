@@ -6,6 +6,7 @@ pub mod failover;
 pub mod fallback_pick;
 pub mod fingerprint;
 pub mod model_id;
+pub mod model_spec;
 pub mod models;
 pub mod openai_schema;
 pub mod pricing;
@@ -37,6 +38,7 @@ pub use fallback_pick::{
     pick_next_fallback_route_with_options,
 };
 pub use fingerprint::{log_provider_canonical_input, stable_hash_json, stable_hash_str};
+pub use model_spec::{ModelSpec, ModelSpecSeparator, format_provider_model, parse_model_spec};
 pub use models::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, DEFAULT_CLAUDE_MODEL,
     DEFAULT_CONTEXT_LIMIT, DEFAULT_OPENAI_MODEL, ModelCapabilities, OPENAI_API_ONLY_PRO_MODELS,
@@ -777,6 +779,32 @@ pub struct RouteSelection {
     pub detail: String,
 }
 
+/// Durable provider/model identity for a selected route.
+///
+/// This is deliberately separate from [`RouteSelection::routed_model_spec`]:
+/// the latter is an invocation string understood by `set_model`, while this
+/// value is the stable identity persisted in a session. The provider side is
+/// derived from [`RuntimeKey`] rather than a display label, and the model side
+/// is opaque after the provider boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CanonicalModelIdentity {
+    pub provider: String,
+    pub model: String,
+}
+
+impl CanonicalModelIdentity {
+    pub fn new(provider: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into().trim().to_string(),
+            model: model.into().trim().to_string(),
+        }
+    }
+
+    pub fn serialized(&self) -> String {
+        format!("{}/{}", self.provider, self.model)
+    }
+}
+
 impl RouteSelection {
     pub fn from_model_route(route: &ModelRoute) -> Self {
         let api_method = route.api_method_kind();
@@ -787,6 +815,26 @@ impl RouteSelection {
             provider_label: route.provider.clone(),
             detail: route.detail.clone(),
         }
+    }
+
+    /// Durable provider/model identity for this exact route.
+    ///
+    /// OpenRouter endpoint routes use the display label only as an upstream
+    /// pin because `RuntimeKey::OpenRouter` identifies the actual runtime.
+    /// The pin is part of the opaque model remainder and is therefore retained
+    /// across session save/restore.
+    pub fn canonical_model_identity(&self) -> CanonicalModelIdentity {
+        let model = match &self.runtime_key {
+            RuntimeKey::OpenRouter => {
+                openrouter_opaque_route_model(&self.model, &self.provider_label)
+            }
+            _ => self.model.trim().to_string(),
+        };
+        CanonicalModelIdentity::new(self.runtime_key.canonical_provider_id(), model)
+    }
+
+    pub fn canonical_session_model(&self) -> String {
+        self.canonical_model_identity().serialized()
     }
 
     /// The string model spec that applies this route selection, including any
@@ -835,17 +883,69 @@ impl RouteSelection {
     }
 }
 
+impl ModelRoute {
+    /// Durable provider/model identity for this exact route.
+    pub fn canonical_model_identity(&self) -> CanonicalModelIdentity {
+        RouteSelection::from_model_route(self).canonical_model_identity()
+    }
+}
+
+impl RuntimeKey {
+    /// Stable provider namespace used by canonical session identities.
+    pub fn canonical_provider_id(&self) -> String {
+        match self {
+            Self::JcodeSubscription => "jcode".to_string(),
+            Self::ClaudeOAuth | Self::AnthropicApiKey => "claude".to_string(),
+            Self::OpenAIOAuth | Self::OpenAIApiKey => "openai".to_string(),
+            Self::OpenRouter => "openrouter".to_string(),
+            Self::OpenAiCompatible {
+                profile_id: Some(profile_id),
+            } => profile_id.trim().to_string(),
+            Self::OpenAiCompatible { profile_id: None } => "openai-compatible".to_string(),
+            Self::Copilot => "copilot".to_string(),
+            Self::Gemini | Self::CodeAssistOAuth => "gemini".to_string(),
+            Self::Cursor => "cursor".to_string(),
+            Self::Bedrock => "bedrock".to_string(),
+            Self::Antigravity => "antigravity".to_string(),
+            Self::RemoteCatalog => "remote-catalog".to_string(),
+            Self::Current => "current".to_string(),
+            Self::Other(value) => value.trim().to_string(),
+        }
+    }
+}
+
+fn openrouter_opaque_route_model(model: &str, provider_label: &str) -> String {
+    let mut model = model.trim().to_string();
+    if !model.contains('@') {
+        model = openrouter_catalog_model_id(&model);
+        let provider = provider_label.trim();
+        if !provider.is_empty()
+            && !provider.eq_ignore_ascii_case("auto")
+            && !provider.eq_ignore_ascii_case("openrouter")
+        {
+            model.push('@');
+            model.push_str(provider);
+        }
+    }
+    model
+}
+
 /// OpenRouter catalog id for a bare model: claude models gain an `anthropic/`
 /// prefix, OpenAI models an `openai/` prefix, already-qualified ids pass
 /// through. Mirrors `jcode_base::provider::openrouter_catalog_model_id` but
 /// lives here so [`RouteSelection::routed_model_spec`] has no upward dep.
 fn openrouter_catalog_model_id(model: &str) -> String {
     let trimmed = model.trim();
-    match crate::models::provider_for_model(trimmed) {
-        Some("claude") => format!("anthropic/{trimmed}"),
-        Some("openai") => format!("openai/{trimmed}"),
-        _ => trimmed.to_string(),
+    if trimmed.contains('/') || trimmed.contains('@') {
+        return trimmed.to_string();
     }
+    if crate::model_id::matches_known_model(trimmed, crate::models::ALL_CLAUDE_MODELS) {
+        return format!("anthropic/{trimmed}");
+    }
+    if crate::model_id::matches_known_model(trimmed, crate::models::ALL_OPENAI_MODELS) {
+        return format!("openai/{trimmed}");
+    }
+    trimmed.to_string()
 }
 
 /// Typed view of [`ModelRoute::api_method`].
@@ -1638,5 +1738,89 @@ mod tests {
             }
         );
         assert_eq!(selection.provider_label, "NVIDIA NIM");
+    }
+
+    #[test]
+    fn canonical_route_identity_is_separate_from_invocation_spec() {
+        let selection = RouteSelection {
+            model: "gpt-5.4".to_string(),
+            runtime_key: RuntimeKey::OpenRouter,
+            api_method: "openrouter".to_string(),
+            provider_label: "OpenAI".to_string(),
+            detail: String::new(),
+        };
+        assert_eq!(selection.routed_model_spec(), "openai/gpt-5.4@OpenAI");
+        assert_eq!(
+            selection.canonical_session_model(),
+            "openrouter/openai/gpt-5.4@OpenAI"
+        );
+    }
+
+    #[test]
+    fn route_selection_keeps_opaque_openrouter_model_ids_byte_for_byte() {
+        for model in [
+            "gpt-5.4-proxy",
+            "claude-sonnet-custom",
+            "custom/vendor/model",
+            "custom-model@Provider",
+        ] {
+            let selection = RouteSelection {
+                model: model.to_string(),
+                runtime_key: RuntimeKey::OpenRouter,
+                api_method: "openrouter".to_string(),
+                provider_label: "auto".to_string(),
+                detail: String::new(),
+            };
+            assert_eq!(selection.routed_model_spec(), model);
+            assert_eq!(selection.canonical_model_identity().model, model);
+        }
+    }
+
+    #[test]
+    fn named_routing_profiles_keep_distinct_canonical_identities() {
+        let model = "vendor/shared-model";
+        let first = RouteSelection::from_model_route(&ModelRoute {
+            model: model.to_string(),
+            provider: "First Gateway".to_string(),
+            api_method: "openai-compatible:first-gateway".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        });
+        let second = RouteSelection::from_model_route(&ModelRoute {
+            model: model.to_string(),
+            provider: "Second Gateway".to_string(),
+            api_method: "openai-compatible:second-gateway".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        });
+
+        assert_eq!(
+            first.runtime_key,
+            RuntimeKey::OpenAiCompatible {
+                profile_id: Some("first-gateway".to_string())
+            }
+        );
+        assert_eq!(
+            second.runtime_key,
+            RuntimeKey::OpenAiCompatible {
+                profile_id: Some("second-gateway".to_string())
+            }
+        );
+        assert_eq!(first.canonical_model_identity().provider, "first-gateway");
+        assert_eq!(second.canonical_model_identity().provider, "second-gateway");
+        assert_ne!(
+            first.canonical_model_identity(),
+            second.canonical_model_identity()
+        );
+        assert_eq!(
+            first.routed_model_spec(),
+            "first-gateway:vendor/shared-model"
+        );
+        assert_eq!(
+            second.routed_model_spec(),
+            "second-gateway:vendor/shared-model"
+        );
     }
 }

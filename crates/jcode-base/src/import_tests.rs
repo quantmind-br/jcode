@@ -755,7 +755,10 @@ fn test_import_claude_session_uses_recovered_live_transcript() {
     );
     assert_eq!(imported.provider_key.as_deref(), Some("claude-code"));
     assert_eq!(imported.working_dir.as_deref(), Some("/tmp/demo-project"));
-    assert_eq!(imported.model.as_deref(), Some("claude-sonnet-4-6"));
+    assert_eq!(
+        imported.model.as_deref(),
+        Some("claude-code/claude-sonnet-4-6")
+    );
     assert_eq!(imported.messages.len(), 2);
 }
 
@@ -785,7 +788,7 @@ fn test_import_pi_session_creates_jcode_snapshot() {
         imported_pi_session_id(&session_path.to_string_lossy())
     );
     assert_eq!(imported.provider_key.as_deref(), Some("pi"));
-    assert_eq!(imported.model.as_deref(), Some("pi-model"));
+    assert_eq!(imported.model.as_deref(), Some("pi/pi-model"));
     assert_eq!(imported.working_dir.as_deref(), Some("/tmp/pi-demo"));
     assert_eq!(imported.messages.len(), 2);
 }
@@ -886,7 +889,7 @@ fn test_import_opencode_session_creates_jcode_snapshot() {
         imported_opencode_session_id("ses_test_opencode")
     );
     assert_eq!(imported.provider_key.as_deref(), Some("opencode"));
-    assert_eq!(imported.model.as_deref(), Some("big-pickle"));
+    assert_eq!(imported.model.as_deref(), Some("opencode/big-pickle"));
     assert_eq!(imported.working_dir.as_deref(), Some("/tmp/opencode-demo"));
     assert_eq!(imported.messages.len(), 2);
     let all_text: String = imported
