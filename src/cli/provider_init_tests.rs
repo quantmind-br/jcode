@@ -812,6 +812,212 @@ id = "llama3.1:8b"
 #[tokio::test]
 #[expect(
     clippy::await_holding_lock,
+    reason = "test env locks intentionally stay held across provider init to isolate process-global runtime env"
+)]
+async fn provider_profile_init_uses_multiprovider_and_surfaces_sibling_routes() {
+    let _guard = lock_env();
+    let _env_guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let saved: Vec<(String, Option<String>)> = [
+        "JCODE_HOME",
+        "JCODE_NON_INTERACTIVE",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GITHUB_TOKEN",
+        "GEMINI_API_KEY",
+        "CURSOR_API_KEY",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_DEFAULT_MODEL",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), std::env::var(k).ok()))
+    .collect();
+
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GITHUB_TOKEN",
+        "GEMINI_API_KEY",
+        "CURSOR_API_KEY",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_DEFAULT_MODEL",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ] {
+        crate::env::remove_var(key);
+    }
+    std::fs::write(
+        dir.path().join("config.toml"),
+        r#"
+[provider]
+default_provider = "primary-gateway"
+default_model = "shared-model"
+
+[providers.primary-gateway]
+type = "openai-compatible"
+base_url = "http://127.0.0.1:18080/v1"
+auth = "none"
+default_model = "shared-model"
+requires_api_key = false
+
+[[providers.primary-gateway.models]]
+id = "shared-model"
+
+[[providers.primary-gateway.models]]
+id = "primary-only"
+
+[providers.sibling-gateway]
+type = "openai-compatible"
+base_url = "http://127.0.0.1:18081/v1"
+auth = "none"
+default_model = "shared-model"
+requires_api_key = false
+
+[[providers.sibling-gateway.models]]
+id = "shared-model"
+
+[[providers.sibling-gateway.models]]
+id = "sibling-only"
+"#,
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    // Mimic `jcode --provider-profile primary-gateway` bootstrap: apply the
+    // named profile env, force OpenaiCompatible choice, then init.
+    crate::provider_catalog::apply_named_provider_profile_env("primary-gateway")
+        .expect("apply named provider profile");
+    crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", "primary-gateway");
+    crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
+
+    let provider =
+        init_provider_for_validation(&ProviderChoice::OpenaiCompatible, None)
+            .await
+            .expect("provider-profile bootstrap should build MultiProvider catalog");
+
+    assert_eq!(
+        provider.model(),
+        "shared-model",
+        "active model must stay on the named profile default"
+    );
+    let routes = provider.model_routes();
+    assert!(
+        routes.iter().any(|route| {
+            route.provider == "primary-gateway"
+                && route.model == "shared-model"
+                && route.api_method == "openai-compatible:primary-gateway"
+                && route.available
+        }),
+        "active named profile routes must surface; got {:?}",
+        routes
+            .iter()
+            .map(|r| format!("{}|{}|{}", r.provider, r.model, r.api_method))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        routes.iter().any(|route| {
+            route.provider == "sibling-gateway"
+                && route.model == "sibling-only"
+                && route.api_method == "openai-compatible:sibling-gateway"
+                && route.available
+        }),
+        "sibling named profiles must appear in model_routes under MultiProvider; got {:?}",
+        routes
+            .iter()
+            .map(|r| format!("{}|{}|{}", r.provider, r.model, r.api_method))
+            .collect::<Vec<_>>()
+    );
+
+    // Bare `--model` under --provider-profile must qualify onto the named profile
+    // so a shared model id cannot land on a sibling gateway.
+    crate::provider_catalog::apply_named_provider_profile_env("primary-gateway")
+        .expect("re-apply named provider profile");
+    crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", "primary-gateway");
+    crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
+    let provider = init_provider_for_validation(
+        &ProviderChoice::OpenaiCompatible,
+        Some("primary-only"),
+    )
+    .await
+    .expect("provider-profile bootstrap with bare --model");
+    assert_eq!(
+        provider.model(),
+        "primary-only",
+        "bare --model must bind the named profile's model"
+    );
+    assert!(
+        provider.model_routes().iter().any(|route| {
+            route.provider == "primary-gateway"
+                && route.model == "primary-only"
+                && route.api_method == "openai-compatible:primary-gateway"
+                && route.available
+        }),
+        "bare --model must remain on the active named profile route"
+    );
+
+    crate::provider_catalog::apply_named_provider_profile_env("primary-gateway")
+        .expect("re-apply named provider profile for shared model");
+    crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", "primary-gateway");
+    crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
+    let provider = init_provider_for_validation(
+        &ProviderChoice::OpenaiCompatible,
+        Some("shared-model"),
+    )
+    .await
+    .expect("provider-profile bootstrap with ambiguous bare model");
+    assert_eq!(provider.model(), "shared-model");
+    // Active execution path must be the named primary profile, not sibling.
+    // MultiProvider reports the openrouter slot's runtime_display_name, which
+    // for named profiles is the profile id.
+    assert_eq!(
+        provider.display_name(),
+        "primary-gateway",
+        "bare shared model id must bind primary-gateway, not a sibling"
+    );
+
+    for (key, value) in saved {
+        if let Some(value) = value {
+            crate::env::set_var(&key, value);
+        } else {
+            crate::env::remove_var(&key);
+        }
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
     reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
 )]
 async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_blocking() {

@@ -1585,21 +1585,42 @@ async fn init_provider_with_options(
                 display_name
             ));
             crate::provider::activation::apply_openai_compatible_runtime(runtime_model_hint)?;
-            if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some() {
-                let profile_name = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")?;
-                let cfg = crate::config::config();
-                let profile = cfg.providers.get(&profile_name).ok_or_else(|| {
-                    anyhow::anyhow!("Unknown provider profile '{}'", profile_name)
-                })?;
-                Arc::new(
-                    jcode_provider_openrouter_runtime::OpenRouterProvider::new_named_openai_compatible(
-                        &profile_name,
-                        profile,
-                    )?,
-                )
-            } else {
-                Arc::new(jcode_provider_openrouter_runtime::OpenRouterProvider::new()?)
+            // Always wrap OpenAI-compatible / named profiles in MultiProvider so
+            // the model picker and `jcode model list` surface every configured
+            // provider profile (issue #444), not only the active endpoint.
+            // Bare OpenRouterProvider was hiding sibling [providers.*] entries.
+            select_initial_model_provider("openrouter");
+            let multi = provider::MultiProvider::new_fast();
+            if let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") {
+                let profile_name = profile_name.trim().to_string();
+                if !profile_name.is_empty() {
+                    let cfg = crate::config::config();
+                    let profile = cfg.providers.get(&profile_name).ok_or_else(|| {
+                        anyhow::anyhow!("Unknown provider profile '{}'", profile_name)
+                    })?;
+                    if let Some(default_model) = profile
+                        .default_model
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|model| !model.is_empty())
+                    {
+                        // Bind the named profile route explicitly so the active
+                        // runtime is the config profile (not a bare OpenRouter
+                        // slot) even when config.default_model is unrelated.
+                        // Use `profile:model` (picker / named_provider_profile_model_prefix
+                        // form). Never fall back to a bare model id — that can
+                        // silently bind a sibling provider with the same model
+                        // name and reintroduce the isolation bug this fixes.
+                        let spec = format!("{profile_name}:{default_model}");
+                        multi.set_model(&spec).map_err(|err| {
+                            anyhow::anyhow!(
+                                "Failed to select model '{default_model}' on provider profile '{profile_name}': {err}"
+                            )
+                        })?;
+                    }
+                }
             }
+            Arc::new(multi)
         }
         ProviderChoice::Antigravity => {
             disable_subscription_runtime_mode();
@@ -1817,11 +1838,24 @@ async fn init_provider_with_options(
     }
 
     if let Some(model_name) = model {
-        let spec = match explicit_provider_namespace(choice) {
-            Some(namespace) if provider::parse_model_spec(model_name).provider.is_none() => {
-                format!("{namespace}:{model_name}")
+        let parsed = provider::parse_model_spec(model_name);
+        let spec = if parsed.provider.is_some() {
+            model_name.to_string()
+        } else if let Some(namespace) = explicit_provider_namespace(choice) {
+            format!("{namespace}:{model_name}")
+        } else if let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") {
+            // `--provider-profile` / named config profiles share MultiProvider
+            // with siblings that may advertise the same bare model id. Qualify
+            // the CLI model onto the active named profile so selection cannot
+            // silently land on a sibling route.
+            let profile_name = profile_name.trim();
+            if profile_name.is_empty() {
+                model_name.to_string()
+            } else {
+                format!("{profile_name}:{model_name}")
             }
-            _ => model_name.to_string(),
+        } else {
+            model_name.to_string()
         };
         provider
             .set_model(&spec)
