@@ -230,7 +230,11 @@ pub fn globally_preferred_default_route(routes: &[ModelRoute]) -> Option<ModelRo
         .enumerate()
         .filter(|(_, route)| route.available)
         .min_by_key(|(catalog_index, route)| {
-            (globally_preferred_model_rank(&route.model), *catalog_index)
+            (
+                globally_preferred_model_rank(&route.model),
+                crate::provider::canonical_route_identity(route).unwrap_or_default(),
+                *catalog_index,
+            )
         })
         .map(|(_, route)| route.clone())
 }
@@ -1917,6 +1921,54 @@ mod tests {
         let selected = globally_preferred_default_route(&routes).expect("fallback route");
         assert_eq!(selected.model, "provider-a-frontier");
         assert_eq!(selected.api_method, "provider-a");
+    }
+
+    #[test]
+    fn global_default_route_breaks_homonym_ties_by_canonical_identity() {
+        let forward = vec![
+            route(
+                "gpt-5.6-sol",
+                "Provider B",
+                "openai-compatible:prov-b",
+                true,
+            ),
+            route(
+                "gpt-5.6-sol",
+                "Provider A",
+                "openai-compatible:prov-a",
+                true,
+            ),
+        ];
+        let reverse = vec![
+            route(
+                "gpt-5.6-sol",
+                "Provider A",
+                "openai-compatible:prov-a",
+                true,
+            ),
+            route(
+                "gpt-5.6-sol",
+                "Provider B",
+                "openai-compatible:prov-b",
+                true,
+            ),
+        ];
+
+        let forward_selected =
+            globally_preferred_default_route(&forward).expect("homonym route");
+        let reverse_selected =
+            globally_preferred_default_route(&reverse).expect("homonym route");
+
+        assert_eq!(forward_selected.model, reverse_selected.model);
+        assert_eq!(forward_selected.api_method, reverse_selected.api_method);
+        assert_eq!(
+            crate::provider::canonical_route_identity(&forward_selected),
+            crate::provider::canonical_route_identity(&reverse_selected)
+        );
+        assert_eq!(
+            crate::provider::canonical_route_identity(&forward_selected).as_deref(),
+            Some("prov-a/gpt-5.6-sol")
+        );
     }
 
     #[test]
