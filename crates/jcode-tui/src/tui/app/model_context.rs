@@ -38,9 +38,10 @@ impl App {
         self.invalidate_model_picker_cache();
         let active_model = self.provider.model();
         self.update_context_limit_for_model(&active_model);
+        let provider_name = self.provider.display_name();
         let meta = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
             model_request,
-            self.provider.name(),
+            &provider_name,
             self.session.provider_key.as_deref(),
         );
         model_route_metadata::apply_session_route_metadata(

@@ -2256,12 +2256,14 @@ fn test_context_limit_claude() {
 
 #[test]
 fn test_context_limit_dynamic_cache() {
-    populate_context_limits(
-        [("test-model-xyz".to_string(), 64_000)]
-            .into_iter()
-            .collect(),
-    );
-    assert_eq!(context_limit_for_model("test-model-xyz"), Some(64_000));
+    with_clean_provider_test_env(|| {
+        populate_context_limits(
+            [("test-model-xyz".to_string(), 64_000)]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(context_limit_for_model("test-model-xyz"), Some(64_000));
+    });
 }
 
 // --- Migrated from the OpenRouter runtime tests: these exercise MultiProvider
