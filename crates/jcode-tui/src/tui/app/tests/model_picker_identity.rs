@@ -720,3 +720,67 @@ fn tui_startup_and_clear_stamp_named_profile_session_identity() {
         crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
     }
 }
+
+#[test]
+fn fill_missing_does_not_promote_legacy_openrouter_identity_marker() {
+    // Resume path: older sessions may have model+provider_key but no
+    // model_identity_format. Promoting only the marker would reinterpret
+    // historical OpenRouter ids (openrouter/custom-model).
+    let _env_lock = crate::storage::lock_test_env();
+    let mut session = crate::session::Session::create(None, None);
+    session.model = Some("openrouter/custom-model".to_string());
+    session.provider_key = Some("openrouter".to_string());
+    session.route_api_method = Some("openrouter".to_string());
+    session.model_identity_format = None;
+
+    let provider: Arc<dyn Provider> = Arc::new(NamedProvider {
+        provider_name: "openrouter",
+        provider_model: "anthropic/claude-sonnet-4",
+    });
+    crate::tui::app::model_context::model_route_metadata::fill_missing_session_route_metadata_from_provider(
+        &mut session,
+        provider.as_ref(),
+    );
+
+    assert_eq!(session.model.as_deref(), Some("openrouter/custom-model"));
+    assert_eq!(session.provider_key.as_deref(), Some("openrouter"));
+    assert_eq!(session.model_identity_format, None);
+
+    // Historical restore request must still double-wrap under openrouter:
+    let request = crate::provider::MultiProvider::model_switch_request_for_session_route(
+        session.model.as_deref().expect("model"),
+        session.provider_key.as_deref(),
+        session.route_api_method.as_deref(),
+    );
+    assert_eq!(request, "openrouter:openrouter/custom-model");
+}
+
+#[test]
+fn fill_missing_promotes_format_only_after_recanonicalizing_existing_model() {
+    // When provider_key is missing (so fill has real work), promoting to format
+    // 1 must re-canonicalize any pre-existing model under the old marker first.
+    let _env_lock = crate::storage::lock_test_env();
+    let mut session = crate::session::Session::create(None, None);
+    session.model = Some("openrouter/custom-model".to_string());
+    session.provider_key = None;
+    session.route_api_method = Some("openrouter".to_string());
+    session.model_identity_format = None;
+
+    let provider: Arc<dyn Provider> = Arc::new(NamedProvider {
+        provider_name: "openrouter",
+        provider_model: "openrouter/gpt-5.4",
+    });
+    crate::tui::app::model_context::model_route_metadata::fill_missing_session_route_metadata_from_provider(
+        &mut session,
+        provider.as_ref(),
+    );
+
+    assert_eq!(session.provider_key.as_deref(), Some("openrouter"));
+    assert_eq!(session.model_identity_format, Some(1));
+    // Under format-none, openrouter/custom-model is re-canonicalized to the
+    // historical outer-namespace form before the marker becomes 1.
+    assert_eq!(
+        session.model.as_deref(),
+        Some("openrouter/openrouter/custom-model")
+    );
+}

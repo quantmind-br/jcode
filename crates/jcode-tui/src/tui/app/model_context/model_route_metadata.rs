@@ -110,6 +110,13 @@ pub(crate) fn stamp_session_route_metadata_from_provider(
 
 /// Fill only missing session identity fields from the live provider.
 /// Used on resume when older sessions lack provider_key/model.
+///
+/// Important: do not promote `model_identity_format` to `1` while leaving a
+/// legacy bare/historical model string alone. Format-none OpenRouter ids such
+/// as `openrouter/custom-model` are intentionally interpreted differently from
+/// format-1 ids with the same text. Promote the marker only after the stored
+/// model has been re-canonicalized under the old marker, or leave the marker
+/// unset when it is the only missing field.
 pub(crate) fn fill_missing_session_route_metadata_from_provider(
     session: &mut crate::session::Session,
     provider: &dyn crate::provider::Provider,
@@ -120,6 +127,17 @@ pub(crate) fn fill_missing_session_route_metadata_from_provider(
     {
         return;
     }
+
+    let had_model = session.model.is_some();
+    let had_provider_key = session.provider_key.is_some();
+    let had_format = session.model_identity_format.is_some();
+
+    // If the only missing field is the identity marker, leave it unset so
+    // historical restore semantics for legacy OpenRouter ids stay intact.
+    if had_model && had_provider_key && !had_format {
+        return;
+    }
+
     let provider_name = provider.display_name();
     let meta = crate::provider::MultiProvider::session_route_metadata_from_model_switch(
         provider.model().as_str(),
@@ -136,6 +154,22 @@ pub(crate) fn fill_missing_session_route_metadata_from_provider(
         session.route_api_method = meta.route_api_method;
     }
     if session.model_identity_format.is_none() {
+        // We are about to mark this session as format 1. If a model string was
+        // already present under the historical (format-none) interpretation,
+        // re-canonicalize it under that old marker first so promotion cannot
+        // silently change OpenRouter restore semantics.
+        if let Some(existing_model) = session.model.clone() {
+            let promoted =
+                crate::provider::MultiProvider::canonical_session_model_with_identity_format(
+                    &existing_model,
+                    session.provider_key.as_deref(),
+                    session.route_api_method.as_deref(),
+                    None,
+                );
+            if !promoted.is_empty() {
+                session.model = Some(promoted);
+            }
+        }
         session.model_identity_format = Some(meta.model_identity_format);
     }
 }
