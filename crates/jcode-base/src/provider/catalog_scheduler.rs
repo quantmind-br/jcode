@@ -97,6 +97,14 @@ fn sweep_stale_profile_catalogs() -> usize {
         if !crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
             continue;
         }
+        // Same #402 redirect: generic openai-compatible is only "configured"
+        // for auth status under a named profile. Named catalogs refresh via
+        // the live runtime path, not the generic profile cache namespace.
+        if profile.id == crate::provider_catalog::OPENAI_COMPAT_PROFILE.id
+            && crate::provider_catalog::active_named_provider_profile_name().is_some()
+        {
+            continue;
+        }
         if !profile_catalog_cache_needs_refresh(profile) {
             continue;
         }

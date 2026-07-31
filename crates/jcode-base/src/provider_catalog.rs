@@ -849,12 +849,15 @@ fn parse_bool_like(value: &str) -> bool {
 }
 
 pub fn openai_compatible_profile_is_configured(profile: OpenAiCompatibleProfile) -> bool {
-    // When a named config profile (`[providers.<name>]`, selected via
-    // `--provider-profile`) is active, its credentials live under the runtime
-    // env vars set by `apply_named_provider_profile_env`, not the built-in
-    // `openai-compatible.env`. Honor those first so auth-test does not report a
-    // false `not_configured` for a correctly-configured named profile (#402).
-    if let Some(configured) = active_named_provider_profile_is_configured() {
+    // Named config profiles (`--provider-profile`) store credentials under the
+    // runtime env set by `apply_named_provider_profile_env`. Auth/status for the
+    // generic openai-compatible login target must honor those (#402). Scope the
+    // redirect to that generic profile only — applying it to every built-in
+    // would mark the whole catalog configured whenever any named profile is
+    // active and flood picker/scheduler with unrelated routes.
+    if profile.id == OPENAI_COMPAT_PROFILE.id
+        && let Some(configured) = active_named_provider_profile_is_configured()
+    {
         return configured;
     }
 
@@ -871,9 +874,42 @@ pub fn openai_compatible_profile_is_configured(profile: OpenAiCompatibleProfile)
         return true;
     }
 
+    // Explicit `--provider <no-auth profile>` sets ALLOW_NO_AUTH + cache
+    // namespace for that profile id only. Honor it solely for the matching
+    // profile so other keyless catalog profiles stay disabled.
+    if active_openai_compatible_no_auth_matches(profile.id) {
+        return true;
+    }
+
     load_env_value_from_env_or_config(OPENAI_COMPAT_LOCAL_ENABLED_ENV, &resolved.env_file)
         .map(|value| parse_bool_like(&value))
         .unwrap_or(false)
+}
+
+fn active_openai_compatible_no_auth_matches(profile_id: &str) -> bool {
+    let allow_no_auth = std::env::var("JCODE_OPENROUTER_ALLOW_NO_AUTH")
+        .map(|value| parse_bool_like(&value))
+        .unwrap_or(false);
+    if !allow_no_auth {
+        return false;
+    }
+    let Some(namespace) = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    namespace.eq_ignore_ascii_case(profile_id)
+}
+
+/// Active named config profile name (`[providers.<name>]`), if one is selected
+/// via `--provider-profile` / `apply_named_provider_profile_env`.
+pub fn active_named_provider_profile_name() -> Option<String> {
+    std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Resolve the active named provider profile's credential env var + env file,
@@ -883,10 +919,7 @@ pub fn openai_compatible_profile_is_configured(profile: OpenAiCompatibleProfile)
 pub fn active_named_provider_profile_credential_source() -> Option<(String, String)> {
     // Presence of this var marks an active named profile (set by
     // `apply_named_provider_profile_env`).
-    let _profile_name = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())?;
+    let _profile_name = active_named_provider_profile_name()?;
 
     let key_env = std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
         .ok()

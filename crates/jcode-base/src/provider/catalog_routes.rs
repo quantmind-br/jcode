@@ -451,6 +451,15 @@ fn append_openai_compatible_profile_routes(
         if !crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
             continue;
         }
+        // Named profiles contribute via the named-route loop / live runtime.
+        // The generic openai-compatible entry is only "configured" for auth
+        // status (#402) while a named profile is active — do not also emit
+        // mislabeled generic routes from that redirect.
+        if profile.id == crate::provider_catalog::OPENAI_COMPAT_PROFILE.id
+            && crate::provider_catalog::active_named_provider_profile_name().is_some()
+        {
+            continue;
+        }
         let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
         let api_method = format!("openai-compatible:{}", resolved.id);
 

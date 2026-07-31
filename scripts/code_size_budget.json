@@ -27,7 +27,7 @@
     "crates/jcode-base/src/import.rs": 1495,
     "crates/jcode-base/src/memory.rs": 2065,
     "crates/jcode-base/src/memory_agent.rs": 1901,
-    "crates/jcode-base/src/provider/catalog_routes.rs": 1431,
+    "crates/jcode-base/src/provider/catalog_routes.rs": 1440,
     "crates/jcode-base/src/provider/mod.rs": 3066,
     "crates/jcode-base/src/provider/models.rs": 1554,
     "crates/jcode-base/src/provider/selection.rs": 1379,
@@ -100,7 +100,7 @@
     "src/cli/commands.rs": 3378,
     "src/cli/dispatch.rs": 1404,
     "src/cli/login.rs": 1403,
-    "src/cli/provider_init.rs": 1855
+    "src/cli/provider_init.rs": 1884
   },
   "version": 1
 }

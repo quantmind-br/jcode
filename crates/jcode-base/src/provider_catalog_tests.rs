@@ -861,6 +861,115 @@ fn matrix_openai_compatible_localhost_override_allows_no_auth() {
 }
 
 #[test]
+fn applied_no_auth_profile_is_configured_only_for_active_namespace() {
+    let _lock = crate::storage::lock_test_env();
+    let _guard = EnvGuard::save(&[
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "JCODE_OPENROUTER_AUTH_HEADER",
+        "JCODE_OPENROUTER_AUTH_HEADER_NAME",
+        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "JCODE_OPENROUTER_PROVIDER",
+        "JCODE_OPENROUTER_NO_FALLBACK",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "OLLAMA_API_KEY",
+        "LMSTUDIO_API_KEY",
+    ]);
+
+    crate::env::remove_var("OLLAMA_API_KEY");
+    crate::env::remove_var("LMSTUDIO_API_KEY");
+    crate::env::remove_var("JCODE_OPENAI_COMPAT_LOCAL_ENABLED");
+    // apply_openai_compatible_profile_env respects a named-profile lock; clear
+    // any leaked markers so this test always exercises the built-in path.
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_NAME");
+    apply_openai_compatible_profile_env(Some(OLLAMA_PROFILE));
+
+    assert!(
+        openai_compatible_profile_is_configured(OLLAMA_PROFILE),
+        "explicit ollama apply must mark only that no-auth profile configured"
+    );
+    assert!(
+        !openai_compatible_profile_is_configured(LMSTUDIO_PROFILE),
+        "sibling keyless profile must stay unconfigured without its own enablement"
+    );
+}
+
+#[test]
+fn active_named_profile_does_not_mark_unrelated_builtin_profiles_configured() {
+    let _lock = crate::storage::lock_test_env();
+    let _guard = EnvGuard::save(&[
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "JCODE_OPENROUTER_AUTH_HEADER",
+        "JCODE_OPENROUTER_AUTH_HEADER_NAME",
+        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "JCODE_OPENROUTER_PROVIDER",
+        "JCODE_OPENROUTER_NO_FALLBACK",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "OLLAMA_API_KEY",
+        "LMSTUDIO_API_KEY",
+        "OPENAI_COMPAT_API_KEY",
+    ]);
+
+    for key in [
+        "OLLAMA_API_KEY",
+        "LMSTUDIO_API_KEY",
+        "OPENAI_COMPAT_API_KEY",
+        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+    ] {
+        crate::env::remove_var(key);
+    }
+
+    // Simulate an active named no-auth profile (as --provider-profile does).
+    crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", "primary-gateway");
+    crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
+    crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", "primary-gateway");
+    crate::env::set_var("JCODE_OPENROUTER_ALLOW_NO_AUTH", "1");
+    crate::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", "primary-gateway");
+    crate::env::set_var("JCODE_OPENROUTER_TRANSPORT_STATE", "direct-no-auth");
+
+    assert!(
+        openai_compatible_profile_is_configured(OPENAI_COMPAT_PROFILE),
+        "generic openai-compatible auth target must honor active named profile (#402)"
+    );
+    assert!(
+        !openai_compatible_profile_is_configured(OLLAMA_PROFILE),
+        "active named profile must not mark unrelated built-in profiles configured"
+    );
+    assert!(
+        !openai_compatible_profile_is_configured(LMSTUDIO_PROFILE),
+        "active named profile must not mark unrelated built-in profiles configured"
+    );
+}
+
+#[test]
 fn matrix_load_api_key_from_env_or_config_prefers_env() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");

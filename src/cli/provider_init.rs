@@ -1585,10 +1585,7 @@ async fn init_provider_with_options(
                 display_name
             ));
             crate::provider::activation::apply_openai_compatible_runtime(runtime_model_hint)?;
-            // Always wrap OpenAI-compatible / named profiles in MultiProvider so
-            // the model picker and `jcode model list` surface every configured
-            // provider profile (issue #444), not only the active endpoint.
-            // Bare OpenRouterProvider was hiding sibling [providers.*] entries.
+            // MultiProvider so model picker lists every configured profile (#444).
             select_initial_model_provider("openrouter");
             let multi = provider::MultiProvider::new_fast();
             if let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") {
@@ -1604,13 +1601,7 @@ async fn init_provider_with_options(
                         .map(str::trim)
                         .filter(|model| !model.is_empty())
                     {
-                        // Bind the named profile route explicitly so the active
-                        // runtime is the config profile (not a bare OpenRouter
-                        // slot) even when config.default_model is unrelated.
-                        // Use `profile:model` (picker / named_provider_profile_model_prefix
-                        // form). Never fall back to a bare model id — that can
-                        // silently bind a sibling provider with the same model
-                        // name and reintroduce the isolation bug this fixes.
+                        // `profile:model` only — bare ids can bind sibling routes.
                         let spec = format!("{profile_name}:{default_model}");
                         multi.set_model(&spec).map_err(|err| {
                             anyhow::anyhow!(
@@ -1828,13 +1819,17 @@ async fn init_provider_with_options(
         && model.is_none()
         && let Some(profile) = profile_for_choice(choice)
         && let Some(default_model) = resolved_profile_default_model(profile)
-        && provider.set_model(&default_model).is_ok()
     {
-        let resolved = resolve_openai_compatible_profile(profile);
-        init_notice(&format!(
-            "Using default model for {}: {}",
-            resolved.display_name, default_model
-        ));
+        // MultiProvider needs the profile-qualified form so the active runtime
+        // becomes the chosen OpenAI-compatible profile, not a bare OpenRouter slot.
+        let spec = format!("{}:{default_model}", profile.id);
+        if provider.set_model(&spec).is_ok() {
+            let resolved = resolve_openai_compatible_profile(profile);
+            init_notice(&format!(
+                "Using default model for {}: {}",
+                resolved.display_name, default_model
+            ));
+        }
     }
 
     if let Some(model_name) = model {
@@ -1844,16 +1839,16 @@ async fn init_provider_with_options(
         } else if let Some(namespace) = explicit_provider_namespace(choice) {
             format!("{namespace}:{model_name}")
         } else if let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") {
-            // `--provider-profile` / named config profiles share MultiProvider
-            // with siblings that may advertise the same bare model id. Qualify
-            // the CLI model onto the active named profile so selection cannot
-            // silently land on a sibling route.
+            // Qualify bare --model onto named profile; avoid sibling collisions.
             let profile_name = profile_name.trim();
             if profile_name.is_empty() {
                 model_name.to_string()
             } else {
                 format!("{profile_name}:{model_name}")
             }
+        } else if let Some(profile) = profile_for_choice(choice) {
+            // Built-in OpenAI-compatible choices also need profile-qualified bind.
+            format!("{}:{model_name}", profile.id)
         } else {
             model_name.to_string()
         };

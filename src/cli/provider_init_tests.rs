@@ -698,7 +698,11 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
         std::env::var("JCODE_RUNTIME_PROVIDER").ok().as_deref(),
         Some("openai-compatible")
     );
-    assert_eq!(provider.name(), "openrouter");
+    // Compatible choices now bootstrap MultiProvider so sibling profiles remain
+    // listable; the fixed slot name is OpenRouter, while the active profile label
+    // is Ollama.
+    assert_eq!(provider.name(), "OpenRouter");
+    assert_eq!(provider.display_name(), "Ollama");
     assert_eq!(provider.model(), "llama3.2");
 
     for (key, value) in saved {
@@ -920,10 +924,9 @@ id = "sibling-only"
     crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", "primary-gateway");
     crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
 
-    let provider =
-        init_provider_for_validation(&ProviderChoice::OpenaiCompatible, None)
-            .await
-            .expect("provider-profile bootstrap should build MultiProvider catalog");
+    let provider = init_provider_for_validation(&ProviderChoice::OpenaiCompatible, None)
+        .await
+        .expect("provider-profile bootstrap should build MultiProvider catalog");
 
     assert_eq!(
         provider.model(),
@@ -957,6 +960,17 @@ id = "sibling-only"
             .map(|r| format!("{}|{}|{}", r.provider, r.model, r.api_method))
             .collect::<Vec<_>>()
     );
+    assert!(
+        routes
+            .iter()
+            .all(|route| route.api_method != "openai-compatible:openai-compatible"),
+        "named profile must not emit mislabeled generic openai-compatible routes; got {:?}",
+        routes
+            .iter()
+            .filter(|route| route.api_method == "openai-compatible:openai-compatible")
+            .map(|r| format!("{}|{}|{}", r.provider, r.model, r.api_method))
+            .collect::<Vec<_>>()
+    );
 
     // Bare `--model` under --provider-profile must qualify onto the named profile
     // so a shared model id cannot land on a sibling gateway.
@@ -964,12 +978,10 @@ id = "sibling-only"
         .expect("re-apply named provider profile");
     crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", "primary-gateway");
     crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
-    let provider = init_provider_for_validation(
-        &ProviderChoice::OpenaiCompatible,
-        Some("primary-only"),
-    )
-    .await
-    .expect("provider-profile bootstrap with bare --model");
+    let provider =
+        init_provider_for_validation(&ProviderChoice::OpenaiCompatible, Some("primary-only"))
+            .await
+            .expect("provider-profile bootstrap with bare --model");
     assert_eq!(
         provider.model(),
         "primary-only",
@@ -989,12 +1001,10 @@ id = "sibling-only"
         .expect("re-apply named provider profile for shared model");
     crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", "primary-gateway");
     crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
-    let provider = init_provider_for_validation(
-        &ProviderChoice::OpenaiCompatible,
-        Some("shared-model"),
-    )
-    .await
-    .expect("provider-profile bootstrap with ambiguous bare model");
+    let provider =
+        init_provider_for_validation(&ProviderChoice::OpenaiCompatible, Some("shared-model"))
+            .await
+            .expect("provider-profile bootstrap with ambiguous bare model");
     assert_eq!(provider.model(), "shared-model");
     // Active execution path must be the named primary profile, not sibling.
     // MultiProvider reports the openrouter slot's runtime_display_name, which
