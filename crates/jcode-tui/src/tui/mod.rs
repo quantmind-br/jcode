@@ -254,7 +254,15 @@ pub trait TuiState {
     }
 
     // ---- Provider ----
-    fn provider_name(&self) -> String;
+    /// Machine-facing runtime key for the active route (`openrouter`, `claude`, …).
+    /// Classification, cache-TTL family lookup and spend bucketing only — NEVER
+    /// rendered: the OpenRouter slot reports `openrouter` for every direct
+    /// OpenAI-compatible profile it multiplexes.
+    fn provider_runtime_key(&self) -> String;
+    /// Human-facing label for the provider actually serving the session
+    /// (`quantmind-openai`, `NVIDIA NIM`, `Anthropic`). Every rendered surface
+    /// MUST use this instead of `Provider::name()`.
+    fn provider_display_name(&self) -> String;
     fn provider_model(&self) -> String;
     /// Upstream provider (e.g., which provider OpenRouter routed to)
     fn upstream_provider(&self) -> Option<String>;

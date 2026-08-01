@@ -920,7 +920,7 @@ pub(super) fn handle_model_status_command(app: &mut App, trimmed: &str) -> bool 
     let provider = parts
         .next()
         .map(str::to_string)
-        .unwrap_or_else(|| app.provider_name().to_string());
+        .unwrap_or_else(|| app.provider_runtime_key());
     let explicit_model = parts.collect::<Vec<_>>().join(" ");
     let model = if explicit_model.trim().is_empty() {
         app.provider_model()
@@ -1013,7 +1013,7 @@ pub(super) fn handle_log_command(app: &mut App, trimmed: &str) -> bool {
         "JCODE_LOG_MARK id={} session={} provider={} model={} cwd={} note={}",
         marker_id,
         app.session.id,
-        app.provider_name(),
+        app.provider_runtime_key(),
         app.provider_model(),
         working_dir,
         note_for_log

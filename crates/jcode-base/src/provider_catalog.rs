@@ -296,6 +296,39 @@ pub fn runtime_provider_display_name(provider_name: &str) -> String {
     }
 }
 
+/// Human-facing label for a persisted `session.provider_key`.
+///
+/// The key is the canonical provider identity (`openrouter`, `nvidia-nim`,
+/// `quantmind-openai`); this maps it onto the name a user recognises. Built-in
+/// slots are matched before the OpenAI-compatible catalog because the catalog
+/// also carries an `openrouter` profile and the public aggregator must keep its
+/// own label. Unknown keys (named `[providers.<name>]` profiles, future
+/// runtimes) are returned verbatim: that is the name the user configured.
+/// Returns `None` only for an empty key, so callers can fall back to a live
+/// provider label.
+pub fn provider_label_for_session_key(provider_key: &str) -> Option<String> {
+    let key = provider_key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let label = match key.to_ascii_lowercase().as_str() {
+        "openai" => "OpenAI".to_string(),
+        "claude" | "anthropic" => "Anthropic".to_string(),
+        "openrouter" => "OpenRouter".to_string(),
+        "copilot" => "GitHub Copilot".to_string(),
+        "cursor" => "Cursor".to_string(),
+        "gemini" => "Gemini".to_string(),
+        "bedrock" => "Bedrock".to_string(),
+        "antigravity" => "Antigravity".to_string(),
+        "jcode" => "Jcode".to_string(),
+        other => match openai_compatible_profile_by_id(other) {
+            Some(profile) => profile.display_name.to_string(),
+            None => key.to_string(),
+        },
+    };
+    Some(label)
+}
+
 pub fn openai_compatible_profile_by_id(id: &str) -> Option<OpenAiCompatibleProfile> {
     let normalized = id.trim().to_ascii_lowercase();
     openai_compatible_profiles()

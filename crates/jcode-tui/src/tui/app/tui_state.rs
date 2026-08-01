@@ -190,6 +190,45 @@ impl App {
             .filter(|provider| !provider.trim().is_empty())
     }
 
+    /// See `TuiState::provider_runtime_key`.
+    pub(crate) fn provider_runtime_key(&self) -> String {
+        if self.is_remote {
+            self.remote_header_provider_name()
+                .unwrap_or_else(|| self.provider.name().to_string())
+        } else {
+            self.provider.name().to_string()
+        }
+    }
+
+    /// See `TuiState::provider_display_name`.
+    pub(crate) fn provider_display_name(&self) -> String {
+        if self.uses_server_or_replay_metadata() {
+            // Remote/replay run an inert provider; the server's label is the
+            // only live truth, then the persisted canonical identity.
+            return self
+                .remote_header_provider_name()
+                .or_else(|| self.session_provider_key_label())
+                .unwrap_or_else(|| self.provider.display_name());
+        }
+        // Local: `MultiProvider::display_name()` asks the active execution
+        // runtime, so it stays correct after a `/model` switch or a failover
+        // (`complete_with_failover` calls `set_active_provider`), which the
+        // persisted session key does not follow.
+        let live = self.provider.display_name();
+        if live.trim().is_empty() {
+            self.session_provider_key_label().unwrap_or_default()
+        } else {
+            live
+        }
+    }
+
+    fn session_provider_key_label(&self) -> Option<String> {
+        self.session
+            .provider_key
+            .as_deref()
+            .and_then(crate::provider_catalog::provider_label_for_session_key)
+    }
+
     fn widget_route_info(&self, model: Option<&str>) -> WidgetRouteInfo {
         let uses_remote_widget_metadata = self.is_remote || self.is_replay_runtime();
         let remote_provider_name = if uses_remote_widget_metadata {
@@ -373,7 +412,7 @@ impl App {
             spark: None,
             spark_resets_at: None,
             total_cost: self.cost.total_cost,
-            source_label: Some(self.provider_name().to_string()),
+            source_label: Some(<Self as crate::tui::TuiState>::provider_display_name(self)),
             input_tokens: display_input_tokens,
             output_tokens: display_output_tokens,
             cache_read_tokens: self.streaming.streaming_cache_read_tokens,
@@ -633,13 +672,12 @@ impl crate::tui::TuiState for App {
         self.copy_selection_edge_autoscroll.is_some() && self.copy_selection_dragging
     }
 
-    fn provider_name(&self) -> String {
-        if self.is_remote {
-            self.remote_header_provider_name()
-                .unwrap_or_else(|| self.provider.name().to_string())
-        } else {
-            self.provider.name().to_string()
-        }
+    fn provider_runtime_key(&self) -> String {
+        App::provider_runtime_key(self)
+    }
+
+    fn provider_display_name(&self) -> String {
+        App::provider_display_name(self)
     }
 
     fn provider_model(&self) -> String {
@@ -1571,13 +1609,7 @@ impl crate::tui::TuiState for App {
             background_info,
             usage_info,
             tokens_per_second,
-            provider_name: if uses_remote_widget_metadata {
-                self.remote_provider_name
-                    .clone()
-                    .or_else(|| Some(self.provider.display_name()))
-            } else {
-                Some(self.provider.display_name())
-            },
+            provider_name: Some(self.provider_display_name()).filter(|name| !name.is_empty()),
             auth_method,
             upstream_provider: self.upstream_provider.clone(),
             connection_type: self.connection_type.clone(),
@@ -1950,14 +1982,14 @@ impl crate::tui::TuiState for App {
 
     fn cache_ttl_status(&self) -> Option<crate::tui::CacheTtlInfo> {
         let last_completed = self.last_api_completed?;
-        let provider = self.provider_name();
+        let provider = <Self as crate::tui::TuiState>::provider_runtime_key(self);
         let model = self.provider_model();
         let last_provider = self.last_api_completed_provider.as_deref()?;
         let last_model = self.last_api_completed_model.as_deref()?;
         if last_provider != provider || last_model != model {
             return None;
         }
-        let ttl_secs = crate::tui::cache_ttl_for_provider_model(provider, Some(&model))?;
+        let ttl_secs = crate::tui::cache_ttl_for_provider_model(&provider, Some(&model))?;
         let elapsed = last_completed.elapsed().as_secs();
         let remaining = ttl_secs.saturating_sub(elapsed);
         Some(crate::tui::CacheTtlInfo {

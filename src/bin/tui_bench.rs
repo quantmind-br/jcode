@@ -872,7 +872,11 @@ impl TuiState for BenchState {
         false
     }
 
-    fn provider_name(&self) -> String {
+    fn provider_runtime_key(&self) -> String {
+        self.provider_name.clone()
+    }
+
+    fn provider_display_name(&self) -> String {
         self.provider_name.clone()
     }
 

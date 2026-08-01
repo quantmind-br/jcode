@@ -482,8 +482,24 @@ fn header_provider_auth_tag(
         {
             "api-key"
         }
-        _ => "",
+        other => named_profile_auth_tag(other).unwrap_or(""),
     }
+}
+
+/// Credential tag for a configured `[providers.<name>]` profile. `Some("")` for
+/// a no-auth local endpoint (Ollama/LM Studio style) so the header shows the
+/// bare profile name instead of claiming a key.
+fn named_profile_auth_tag(name: &str) -> Option<&'static str> {
+    let cfg = crate::config::config();
+    let (_, profile) = cfg
+        .providers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))?;
+    let requires_key = profile.requires_api_key.unwrap_or(!matches!(
+        profile.auth,
+        crate::config::NamedProviderAuth::None
+    ));
+    Some(if requires_key { "api-key" } else { "" })
 }
 
 fn header_provider_label(
@@ -624,7 +640,7 @@ fn build_persistent_header_with_auth(
     // client. Keep the connection icon as a separate trailing hint instead.
     let icon = crate::id::session_icon(&session_name);
     let connection_icon = connection_type_icon(app.connection_type().as_deref());
-    let nice_model = header_model_display_name(&model, &app.provider_name());
+    let nice_model = header_model_display_name(&model, &app.provider_display_name());
     let align = Alignment::Left;
     let mut lines: Vec<Line> = Vec::new();
     let w = width as usize;
@@ -760,7 +776,7 @@ fn build_persistent_header_with_auth(
     let provider_label = if model_is_placeholder {
         String::new()
     } else {
-        header_provider_label(&app.provider_name(), auth, active)
+        header_provider_label(&app.provider_display_name(), auth, active)
     };
     let upstream = if model_is_placeholder {
         None

@@ -376,7 +376,7 @@ impl App {
             .unwrap_or_else(|| {
                 // Explicit legacy fallback for sessions saved before durable
                 // route metadata was introduced.
-                let label = <Self as TuiState>::provider_name(self);
+                let label = <Self as TuiState>::provider_runtime_key(self);
                 let runtime = active_runtime_provider_key();
                 crate::provider_activity::source_key_for_provider_label(&label, runtime.as_deref())
             });
@@ -398,7 +398,7 @@ impl App {
         }
 
         let model = <Self as TuiState>::provider_model(self);
-        let provider_name = <Self as TuiState>::provider_name(self).to_lowercase();
+        let provider_name = <Self as TuiState>::provider_runtime_key(self).to_lowercase();
         let route_source = self.active_route_source_identity();
         let is_anthropic = route_source
             .as_ref()
@@ -492,7 +492,7 @@ impl App {
             "openai:api-key".to_string()
         } else {
             use crate::tui::TuiState;
-            let label = <Self as TuiState>::provider_name(self);
+            let label = <Self as TuiState>::provider_runtime_key(self);
             let runtime = active_runtime_provider_key();
             crate::provider_activity::source_key_for_provider_label(&label, runtime.as_deref())
         };

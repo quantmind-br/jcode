@@ -91,6 +91,15 @@ mod viewport;
 use crate::tui::mermaid;
 #[cfg(test)]
 pub(crate) use box_utils::truncate_line_to_width;
+/// Test-only entry point so sibling test modules can render the persistent
+/// header through the private `header` module without widening its items.
+#[cfg(test)]
+pub(super) fn build_persistent_header(
+    app: &dyn crate::tui::TuiState,
+    width: u16,
+) -> Vec<ratatui::text::Line<'static>> {
+    header::build_persistent_header(app, width)
+}
 use box_utils::{
     line_plain_text, render_rounded_box, truncate_line_preserving_suffix_to_width,
     truncate_line_with_ellipsis_to_width,

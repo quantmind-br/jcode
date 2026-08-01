@@ -139,7 +139,7 @@ impl App {
         self.record_completed_stream_cache_usage();
 
         self.last_api_completed = Some(Instant::now());
-        self.last_api_completed_provider = Some(<Self as TuiState>::provider_name(self));
+        self.last_api_completed_provider = Some(<Self as TuiState>::provider_runtime_key(self));
         self.last_api_completed_model = Some(<Self as TuiState>::provider_model(self));
         self.last_turn_input_tokens = {
             // Effective prompt size (input + cache read + creation): for
@@ -174,7 +174,7 @@ impl App {
             .filter(|m| m.role == "user")
             .count();
 
-        let provider = <Self as TuiState>::provider_name(self);
+        let provider = <Self as TuiState>::provider_runtime_key(self);
         let upstream_provider = self.upstream_provider();
         let cache_ttl = self.cache_ttl_status();
         let cache_problem = detect_kv_cache_problem(
@@ -328,10 +328,6 @@ impl App {
 
     pub(super) fn clear_visible_turn_started(&mut self) {
         self.visible_turn_started = None;
-    }
-
-    pub fn provider_name(&self) -> &str {
-        self.provider.name()
     }
 
     pub fn provider_model(&self) -> String {

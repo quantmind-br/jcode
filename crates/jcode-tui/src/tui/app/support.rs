@@ -136,7 +136,7 @@ fn gather_diagnostics(app: &App) -> SupportDiagnostics {
         account_id,
         account_email,
         tier,
-        provider: app.provider_name().to_string(),
+        provider: app.provider_display_name(),
         model: app.provider_model(),
         last_error,
     }

@@ -53,25 +53,7 @@ fn should_debounce_attach_model_prefetch(provider_name: &str) -> bool {
 }
 
 fn history_provider_name_from_session(session: &crate::session::Session) -> Option<String> {
-    let key = session.provider_key.as_deref()?.trim();
-    if key.is_empty() {
-        return None;
-    }
-
-    let label = match key.to_ascii_lowercase().as_str() {
-        "openai" => "OpenAI".to_string(),
-        "claude" | "anthropic" => "Anthropic".to_string(),
-        "openrouter" => "OpenRouter".to_string(),
-        "copilot" => "GitHub Copilot".to_string(),
-        "cursor" => "Cursor".to_string(),
-        "gemini" => "Gemini".to_string(),
-        "bedrock" => "Bedrock".to_string(),
-        "antigravity" => "Antigravity".to_string(),
-        "jcode" => "Jcode".to_string(),
-        other => other.to_string(),
-    };
-
-    Some(label)
+    crate::provider_catalog::provider_label_for_session_key(session.provider_key.as_deref()?)
 }
 
 pub(super) async fn handle_get_state(
@@ -212,7 +194,7 @@ pub(super) async fn handle_get_model_catalog(
                     .ok();
                 let persisted_model = persisted.as_ref().and_then(|session| session.model.clone());
                 (
-                    Some(provider.name().to_string()),
+                    Some(provider.display_name()),
                     persisted_model.or_else(|| Some(provider.model())),
                     provider.available_models_display(),
                     provider.model_routes(),
@@ -488,7 +470,7 @@ async fn send_history_from_persisted_session(
     // large History event, so we do not hold Session + rendered payload +
     // serialized wire bytes simultaneously.
     let provider_name =
-        history_provider_name_from_session(&session).or_else(|| Some(provider.name().to_string()));
+        history_provider_name_from_session(&session).or_else(|| Some(provider.display_name()));
     let provider_model = session.model.clone().or_else(|| Some(provider.model()));
     let subagent_model = session.subagent_model.clone();
     let autoreview_enabled = session.autoreview_enabled;
@@ -872,10 +854,19 @@ mod tests {
 
     #[test]
     fn history_provider_name_preserves_unknown_runtime_profile() {
-        let session = session_with_provider_key(Some("opencode-go"));
+        let session = session_with_provider_key(Some("quantmind-openai"));
         assert_eq!(
             history_provider_name_from_session(&session).as_deref(),
-            Some("opencode-go")
+            Some("quantmind-openai")
+        );
+    }
+
+    #[test]
+    fn history_provider_name_prettifies_builtin_compatible_profile() {
+        let session = session_with_provider_key(Some("nvidia-nim"));
+        assert_eq!(
+            history_provider_name_from_session(&session).as_deref(),
+            Some("NVIDIA NIM")
         );
     }
 }

@@ -1267,3 +1267,37 @@ fn minimax_default_provider_applies_openai_api_key_env_not_openrouter() {
         "MiniMax profile must use minimax.env, not openrouter.env"
     );
 }
+
+#[test]
+fn provider_label_for_session_key_is_none_for_empty_key() {
+    assert_eq!(provider_label_for_session_key(""), None);
+    assert_eq!(provider_label_for_session_key("   "), None);
+}
+
+#[test]
+fn provider_label_for_session_key_preserves_unknown_runtime_profile() {
+    assert_eq!(
+        provider_label_for_session_key("quantmind-openai").as_deref(),
+        Some("quantmind-openai")
+    );
+}
+
+#[test]
+fn provider_label_for_session_key_prettifies_builtin_compatible_profile() {
+    assert_eq!(
+        provider_label_for_session_key("nvidia-nim").as_deref(),
+        Some("NVIDIA NIM")
+    );
+}
+
+#[test]
+fn provider_label_for_session_key_prettifies_builtin_slots() {
+    assert_eq!(
+        provider_label_for_session_key("openrouter").as_deref(),
+        Some("OpenRouter")
+    );
+    assert_eq!(
+        provider_label_for_session_key("claude").as_deref(),
+        Some("Anthropic")
+    );
+}

@@ -757,7 +757,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
     let (cache_read, cache_creation) = app.streaming_cache_tokens();
     let user_turn_count = app.display_user_message_count();
     let (streaming_input_tokens, _) = app.streaming_tokens();
-    let provider_name = app.provider_name();
+    let provider_name = app.provider_runtime_key();
     let upstream_provider = app.upstream_provider();
     let cache_ttl = app.cache_ttl_status();
     let kv_cache_problem = detect_kv_cache_problem(
@@ -1938,7 +1938,7 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         .provider_name
         .clone()
         .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| app.provider_name());
+        .unwrap_or_else(|| app.provider_display_name());
     if !provider.is_empty() && !overscroll_is_runtime_placeholder(&provider) {
         if !spans.is_empty() {
             spans.push(sep());
@@ -2360,7 +2360,7 @@ fn right_fact_lines(app: &dyn TuiState) -> Vec<RightFactLine> {
         .provider_name
         .clone()
         .filter(|provider| !provider.trim().is_empty())
-        .unwrap_or_else(|| app.provider_name());
+        .unwrap_or_else(|| app.provider_display_name());
     if !provider.is_empty() && !overscroll_is_runtime_placeholder(&provider) {
         access.push(Span::styled(
             overscroll_provider_display(&provider),

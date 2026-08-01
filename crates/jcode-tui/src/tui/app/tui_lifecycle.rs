@@ -318,8 +318,9 @@ impl App {
         // Surface the streak as an explicit auth_failed telemetry event to
         // distinguish "breaker tripped on a dead credential" from blips.
         let reason = crate::auth::login_diagnostics::classify_auth_failure_message(message);
-        let provider = self.provider_name().to_string();
-        crate::telemetry::record_auth_failed_reason(&provider, "session", reason.label());
+        let provider_key = self.provider_runtime_key();
+        crate::telemetry::record_auth_failed_reason(&provider_key, "session", reason.label());
+        let provider = self.provider_display_name();
 
         self.push_display_message(DisplayMessage::error(format!(
             "🛑 Stopped automatic retries: {failures} consecutive credential/auth failures. \

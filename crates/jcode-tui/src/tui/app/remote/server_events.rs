@@ -793,7 +793,8 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
                 );
                 app.last_api_completed = Some(Instant::now());
-                app.last_api_completed_provider = Some(<App as TuiState>::provider_name(app));
+                app.last_api_completed_provider =
+                    Some(<App as TuiState>::provider_runtime_key(app));
                 app.last_api_completed_model = Some(<App as TuiState>::provider_model(app));
                 // Effective prompt (input + read + creation), matching the
                 // local push_turn_footer path: this feeds the cache
@@ -882,7 +883,8 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.token_accounting.cache_next_optimal_input_tokens =
                     Some(effective_prompt_tokens);
                 app.last_api_completed = Some(Instant::now());
-                app.last_api_completed_provider = Some(<App as TuiState>::provider_name(app));
+                app.last_api_completed_provider =
+                    Some(<App as TuiState>::provider_runtime_key(app));
                 app.last_api_completed_model = Some(<App as TuiState>::provider_model(app));
                 app.last_turn_input_tokens =
                     (effective_prompt_tokens > 0).then_some(effective_prompt_tokens);

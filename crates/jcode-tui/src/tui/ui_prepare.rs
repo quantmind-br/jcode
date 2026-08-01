@@ -1038,7 +1038,8 @@ fn header_prep_signature(app: &dyn TuiState, width: u16) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     width.hash(&mut hasher);
     app.provider_model().hash(&mut hasher);
-    app.provider_name().hash(&mut hasher);
+    app.provider_display_name().hash(&mut hasher);
+    app.provider_runtime_key().hash(&mut hasher);
     app.session_display_name().hash(&mut hasher);
     app.server_display_name().hash(&mut hasher);
     app.server_display_version().hash(&mut hasher);

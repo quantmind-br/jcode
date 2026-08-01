@@ -836,3 +836,70 @@ fn tui_restore_request_honors_format_one_openrouter_identity() {
         );
     assert_eq!(legacy, "openrouter:openrouter/custom-model");
 }
+
+struct ScopedEnvVar {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(previous) => crate::env::set_var(self.key, previous),
+            None => crate::env::remove_var(self.key),
+        }
+    }
+}
+
+#[test]
+fn named_profile_never_renders_openrouter_label() {
+    let _lock = crate::storage::lock_test_env();
+    // Force the cost-based branch deterministically: env marker short-circuits
+    // OpenRouterTransportState::from_current_env. Restored on drop even when an
+    // assertion panics, so later tests never see a stale transport state.
+    let _transport = ScopedEnvVar::set("JCODE_OPENROUTER_TRANSPORT_STATE", "direct-api-key");
+
+    let app = create_named_test_app("profile:quantmind-openai", "gpt-5.5");
+    assert_eq!(app.provider.name(), "openrouter");
+    assert_eq!(
+        crate::tui::TuiState::provider_display_name(&app),
+        "quantmind-openai"
+    );
+    assert_eq!(
+        crate::tui::TuiState::provider_runtime_key(&app),
+        "openrouter",
+        "the machine-facing key must keep naming the transport slot"
+    );
+
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    assert_eq!(data.provider_name.as_deref(), Some("quantmind-openai"));
+    let usage = data.usage_info.expect("api-key transport must report cost usage");
+    assert_eq!(usage.source_label.as_deref(), Some("quantmind-openai"));
+
+    let rendered = crate::tui::ui::build_persistent_header(&app, 100)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        rendered.contains("quantmind-openai"),
+        "header must name the configured profile: {rendered}"
+    );
+    assert!(
+        !rendered.to_ascii_lowercase().contains("openrouter"),
+        "no visible surface may claim OpenRouter for a direct profile: {rendered}"
+    );
+}

@@ -208,7 +208,12 @@ impl crate::tui::TuiState for TestState {
     fn auto_scroll_paused(&self) -> bool {
         false
     }
-    fn provider_name(&self) -> String {
+    fn provider_runtime_key(&self) -> String {
+        self.provider_name
+            .clone()
+            .unwrap_or_else(|| "mock".to_string())
+    }
+    fn provider_display_name(&self) -> String {
         self.provider_name
             .clone()
             .unwrap_or_else(|| "mock".to_string())

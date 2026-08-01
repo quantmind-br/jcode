@@ -846,7 +846,7 @@ fn test_remote_tui_state_prefers_cached_model_during_brief_connecting_phase() {
     let app = App::new_for_remote(Some(session_id.to_string()));
 
     assert_eq!(crate::tui::TuiState::provider_model(&app), "gpt-5.4");
-    assert_eq!(crate::tui::TuiState::provider_name(&app), "openai");
+    assert_eq!(crate::tui::TuiState::provider_runtime_key(&app), "openai");
     assert_eq!(
         crate::tui::TuiState::session_display_name(&app).as_deref(),
         Some("otter")
@@ -879,7 +879,7 @@ fn test_remote_tui_state_falls_back_to_cached_model_after_startup_phase_clears()
     app.clear_remote_startup_phase();
 
     assert_eq!(crate::tui::TuiState::provider_model(&app), "gpt-5.4");
-    assert_eq!(crate::tui::TuiState::provider_name(&app), "openai");
+    assert_eq!(crate::tui::TuiState::provider_runtime_key(&app), "openai");
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
@@ -975,7 +975,7 @@ fn test_remote_tui_state_shows_connected_after_startup_phase_clears_without_mode
         app.clear_remote_startup_phase();
 
         assert_eq!(crate::tui::TuiState::provider_model(&app), "connected");
-        assert_eq!(crate::tui::TuiState::provider_name(&app), "");
+        assert_eq!(crate::tui::TuiState::provider_runtime_key(&app), "");
     });
 }
 
@@ -993,7 +993,7 @@ fn test_remote_tui_state_hides_brief_connecting_phase_without_cached_model() {
         crate::tui::TuiState::provider_model(&app),
         "connecting to server…"
     );
-    assert_eq!(crate::tui::TuiState::provider_name(&app), "");
+    assert_eq!(crate::tui::TuiState::provider_runtime_key(&app), "");
 
     if let Some(prev_model) = prev_model {
         crate::env::set_var("JCODE_MODEL", prev_model);
@@ -1018,7 +1018,7 @@ fn test_remote_tui_state_prefers_configured_model_during_brief_connecting_phase(
     let app = App::new_for_remote(None);
 
     assert_eq!(crate::tui::TuiState::provider_model(&app), "gpt-5.4");
-    assert_eq!(crate::tui::TuiState::provider_name(&app), "openai");
+    assert_eq!(crate::tui::TuiState::provider_runtime_key(&app), "openai");
 
     if let Some(prev_model) = prev_model {
         crate::env::set_var("JCODE_MODEL", prev_model);
