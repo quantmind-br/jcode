@@ -1303,6 +1303,18 @@ fn provider_label_for_session_key_prettifies_builtin_slots() {
 }
 
 #[test]
+fn provider_label_for_session_key_prettifies_dual_auth_stable_ids() {
+    assert_eq!(
+        provider_label_for_session_key("openai-oauth").as_deref(),
+        Some("OpenAI")
+    );
+    assert_eq!(
+        provider_label_for_session_key("anthropic-api-key").as_deref(),
+        Some("Anthropic")
+    );
+}
+
+#[test]
 fn provider_runtime_key_prefers_route_method_over_profile_identity() {
     assert_eq!(
         provider_runtime_key_for_identity(

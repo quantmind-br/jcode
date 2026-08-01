@@ -311,6 +311,9 @@ pub fn provider_label_for_session_key(provider_key: &str) -> Option<String> {
     if key.is_empty() {
         return None;
     }
+    if let Some(route) = jcode_provider_core::AuthRoute::parse(key) {
+        return Some(jcode_provider_core::provider_label(route.active_provider()).to_string());
+    }
     let label = match key.to_ascii_lowercase().as_str() {
         "openai" => "OpenAI".to_string(),
         "claude" | "anthropic" => "Anthropic".to_string(),

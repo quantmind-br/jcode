@@ -876,6 +876,24 @@ mod tests {
     }
 
     #[test]
+    fn history_provider_name_prettifies_openai_oauth_stable_id() {
+        let session = session_with_provider_key(Some("openai-oauth"));
+        assert_eq!(
+            history_provider_name_from_session(&session).as_deref(),
+            Some("OpenAI")
+        );
+    }
+
+    #[test]
+    fn history_provider_name_prettifies_anthropic_api_key_stable_id() {
+        let session = session_with_provider_key(Some("anthropic-api-key"));
+        assert_eq!(
+            history_provider_name_from_session(&session).as_deref(),
+            Some("Anthropic")
+        );
+    }
+
+    #[test]
     fn history_provider_name_preserves_unknown_runtime_profile() {
         let session = session_with_provider_key(Some("quantmind-openai"));
         assert_eq!(
