@@ -390,6 +390,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
     let decoded = parse_event_json(json)?;
     let ServerEvent::History {
         provider_name,
+        provider_runtime_key,
         provider_model,
         available_models,
         connection_type,
@@ -401,6 +402,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         return Err(anyhow!("wrong event type"));
     };
     assert_eq!(provider_name.as_deref(), Some("openai"));
+    assert_eq!(provider_runtime_key, None);
     assert_eq!(provider_model.as_deref(), Some("gpt-5.4"));
     assert_eq!(available_models, vec!["gpt-5.4"]);
     assert_eq!(connection_type.as_deref(), Some("websocket"));
@@ -414,64 +416,60 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
 
 #[test]
 fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
-    let event = ServerEvent::History {
-        id: 101,
-        session_id: "ses_test_456".to_string(),
-        messages: vec![HistoryMessage {
-            role: "assistant".to_string(),
-            content: "hello".to_string(),
-            tool_calls: None,
-            tool_data: None,
+    let event = ServerEvent::History { id: 101,
+    session_id: "ses_test_456".to_string(),
+    messages: vec![HistoryMessage {
+        role: "assistant".to_string(),
+        content: "hello".to_string(),
+        tool_calls: None,
+        tool_data: None,
+    }],
+    images: Vec::new(), provider_name: Some("quantmind-openai".to_string()), provider_runtime_key: Some("openrouter".to_string()), provider_model: Some("gpt-5.5".to_string()),
+    available_models: vec!["gpt-5.4".to_string()],
+    available_model_routes: Vec::new(),
+    mcp_servers: Vec::new(),
+    skills: Vec::new(),
+    total_tokens: Some((123, 45)),
+    token_usage_totals: Some(TokenUsageTotals {
+        messages_with_token_usage: 2,
+        input_tokens: 123,
+        output_tokens: 45,
+        cache_reported_input_tokens: 100,
+        cache_read_input_tokens: 80,
+        cache_creation_input_tokens: 10,
+    }),
+    all_sessions: Vec::new(),
+    client_count: None,
+    is_canary: None,
+    reload_recovery: None,
+    server_version: None,
+    server_name: None,
+    server_icon: None,
+    server_has_update: None,
+    was_interrupted: None,
+    connection_type: Some("websocket".to_string()),
+    status_detail: None,
+    upstream_provider: None,
+    resolved_credential: None,
+    reasoning_effort: None,
+    service_tier: None,
+    subagent_model: None,
+    autoreview_enabled: None,
+    autojudge_enabled: None,
+    compaction_mode: jcode_config_types::CompactionMode::Reactive,
+    activity: None,
+    side_panel: jcode_side_panel_types::SidePanelSnapshot {
+        focused_page_id: Some("page-1".to_string()),
+        pages: vec![jcode_side_panel_types::SidePanelPage {
+            id: "page-1".to_string(),
+            title: "Notes".to_string(),
+            file_path: "/tmp/notes.md".to_string(),
+            format: jcode_side_panel_types::SidePanelPageFormat::Markdown,
+            source: jcode_side_panel_types::SidePanelPageSource::Managed,
+            content: "# Notes".to_string(),
+            updated_at_ms: 42,
         }],
-        images: Vec::new(),
-        provider_name: Some("openai".to_string()),
-        provider_model: Some("gpt-5.4".to_string()),
-        available_models: vec!["gpt-5.4".to_string()],
-        available_model_routes: Vec::new(),
-        mcp_servers: Vec::new(),
-        skills: Vec::new(),
-        total_tokens: Some((123, 45)),
-        token_usage_totals: Some(TokenUsageTotals {
-            messages_with_token_usage: 2,
-            input_tokens: 123,
-            output_tokens: 45,
-            cache_reported_input_tokens: 100,
-            cache_read_input_tokens: 80,
-            cache_creation_input_tokens: 10,
-        }),
-        all_sessions: Vec::new(),
-        client_count: None,
-        is_canary: None,
-        reload_recovery: None,
-        server_version: None,
-        server_name: None,
-        server_icon: None,
-        server_has_update: None,
-        was_interrupted: None,
-        connection_type: Some("websocket".to_string()),
-        status_detail: None,
-        upstream_provider: None,
-        resolved_credential: None,
-        reasoning_effort: None,
-        service_tier: None,
-        subagent_model: None,
-        autoreview_enabled: None,
-        autojudge_enabled: None,
-        compaction_mode: jcode_config_types::CompactionMode::Reactive,
-        activity: None,
-        side_panel: jcode_side_panel_types::SidePanelSnapshot {
-            focused_page_id: Some("page-1".to_string()),
-            pages: vec![jcode_side_panel_types::SidePanelPage {
-                id: "page-1".to_string(),
-                title: "Notes".to_string(),
-                file_path: "/tmp/notes.md".to_string(),
-                format: jcode_side_panel_types::SidePanelPageFormat::Markdown,
-                source: jcode_side_panel_types::SidePanelPageSource::Managed,
-                content: "# Notes".to_string(),
-                updated_at_ms: 42,
-            }],
-        },
-    };
+    }, };
     let json = encode_event(&event);
     let decoded = parse_event_json(json.trim())?;
     let ServerEvent::History {
@@ -479,6 +477,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         side_panel,
         messages,
         provider_name,
+        provider_runtime_key,
         provider_model,
         total_tokens,
         token_usage_totals,
@@ -488,8 +487,9 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         return Err(anyhow!("expected History event"));
     };
     assert_eq!(id, 101);
-    assert_eq!(provider_name.as_deref(), Some("openai"));
-    assert_eq!(provider_model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(provider_name.as_deref(), Some("quantmind-openai"));
+    assert_eq!(provider_runtime_key.as_deref(), Some("openrouter"));
+    assert_eq!(provider_model.as_deref(), Some("gpt-5.5"));
     assert_eq!(total_tokens, Some((123, 45)));
     assert_eq!(
         token_usage_totals.map(|totals| totals.cache_read_input_tokens),

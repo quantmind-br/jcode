@@ -525,8 +525,10 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
     remote.mark_history_loaded();
 
     app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
     app.remote_provider_name = Some("OpenAI".to_string());
     app.remote_provider_model = Some("gpt-5.5".to_string());
+    app.remote_provider_runtime_key = Some("openai".to_string());
     app.remote_model_options = vec![
         openai_oauth_route("gpt-5.5"),
         claude_oauth_route("claude-sonnet-4"),
@@ -569,15 +571,12 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
     app.pending_route_selection = None;
     app.remote_model_switch_in_flight = true;
     app.handle_server_event(
-        crate::protocol::ServerEvent::ModelChanged {
-            id: 0,
-            model: "claude-sonnet-4".to_string(),
-            provider_name: Some("Anthropic".to_string()),
-            error: None,
-        },
+        crate::protocol::ServerEvent::ModelChanged { id: 0, model: "claude-sonnet-4".to_string(), provider_name: Some("Anthropic".to_string()), provider_runtime_key: None, error: None },
         &mut remote,
     );
     assert!(!app.remote_model_switch_in_flight);
+    assert_eq!(app.remote_provider_runtime_key.as_deref(), Some("claude"));
+    assert_eq!(crate::tui::TuiState::provider_runtime_key(&app), "claude");
 
     // The followup dispatcher resends the failed payload on the new route.
     rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
@@ -613,12 +612,7 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
     app.remote_model_switch_in_flight = true;
 
     app.handle_server_event(
-        crate::protocol::ServerEvent::ModelChanged {
-            id: 0,
-            model: "claude-sonnet-4".to_string(),
-            provider_name: None,
-            error: Some("switch failed".to_string()),
-        },
+        crate::protocol::ServerEvent::ModelChanged { id: 0, model: "claude-sonnet-4".to_string(), provider_name: None, provider_runtime_key: None, error: Some("switch failed".to_string()) },
         &mut remote,
     );
 
@@ -828,6 +822,33 @@ fn test_info_widget_data_includes_connection_type() {
 }
 
 #[test]
+fn test_replay_derives_named_profile_label_and_runtime_key_from_session_metadata() {
+    let mut session = crate::session::Session::create_with_id(
+        "session_quantmind_replay".to_string(),
+        None,
+        Some("quantmind replay".to_string()),
+    );
+    session.model = Some("quantmind-openai/gpt-5.5".to_string());
+    session.provider_key = Some("quantmind-openai".to_string());
+    session.route_api_method = Some("openai-compatible:quantmind-openai".to_string());
+
+    let app = App::new_for_replay_silent(session);
+
+    assert_eq!(crate::tui::TuiState::provider_model(&app), "quantmind-openai/gpt-5.5");
+    assert_eq!(
+        crate::tui::TuiState::provider_display_name(&app),
+        "quantmind-openai"
+    );
+    assert_eq!(crate::tui::TuiState::provider_runtime_key(&app), "openrouter");
+    assert_eq!(
+        crate::tui::TuiState::info_widget_data(&app)
+            .provider_name
+            .as_deref(),
+        Some("quantmind-openai")
+    );
+}
+
+#[test]
 fn test_remote_tui_state_prefers_cached_model_during_brief_connecting_phase() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
@@ -1030,6 +1051,56 @@ fn test_remote_tui_state_prefers_configured_model_during_brief_connecting_phase(
     } else {
         crate::env::remove_var("JCODE_PROVIDER");
     }
+}
+
+#[test]
+fn test_remote_tui_state_prefers_configured_named_provider_over_model_family() {
+    with_temp_jcode_home(|| {
+        let home = crate::storage::jcode_dir().expect("resolve temp JCODE_HOME");
+        std::fs::write(
+            home.join("config.toml"),
+            r#"
+[providers.quantmind-openai]
+type = "openai-compatible"
+base_url = "https://example.com/v1"
+auth = "none"
+default_model = "gpt-5.6-sol"
+model_catalog = false
+"#,
+        )
+        .expect("write named provider config");
+        crate::config::invalidate_config_cache();
+
+        let prev_model = std::env::var_os("JCODE_MODEL");
+        let prev_provider = std::env::var_os("JCODE_PROVIDER");
+        crate::env::set_var("JCODE_MODEL", "gpt-5.6-sol");
+        crate::env::set_var("JCODE_PROVIDER", "quantmind-openai");
+
+        let app = App::new_for_remote(None);
+
+        assert_eq!(crate::tui::TuiState::provider_model(&app), "gpt-5.6-sol");
+        assert_eq!(
+            crate::tui::TuiState::provider_display_name(&app),
+            "quantmind-openai",
+            "configured profile identity must win before History arrives"
+        );
+        assert_eq!(
+            crate::tui::TuiState::provider_runtime_key(&app),
+            "openrouter",
+            "named direct profiles still execute through the OpenRouter transport slot"
+        );
+
+        if let Some(prev_model) = prev_model {
+            crate::env::set_var("JCODE_MODEL", prev_model);
+        } else {
+            crate::env::remove_var("JCODE_MODEL");
+        }
+        if let Some(prev_provider) = prev_provider {
+            crate::env::set_var("JCODE_PROVIDER", prev_provider);
+        } else {
+            crate::env::remove_var("JCODE_PROVIDER");
+        }
+    });
 }
 
 #[test]

@@ -1301,3 +1301,51 @@ fn provider_label_for_session_key_prettifies_builtin_slots() {
         Some("Anthropic")
     );
 }
+
+#[test]
+fn provider_runtime_key_prefers_route_method_over_profile_identity() {
+    assert_eq!(
+        provider_runtime_key_for_identity(
+            Some("quantmind-openai"),
+            Some("openai-compatible:quantmind-openai"),
+            Some("quantmind-openai"),
+        )
+        .as_deref(),
+        Some("openrouter")
+    );
+}
+
+#[test]
+fn provider_runtime_key_maps_builtin_compatible_profiles_to_openrouter_slot() {
+    assert_eq!(
+        provider_runtime_key_for_identity(Some("nvidia-nim"), None, Some("NVIDIA NIM")).as_deref(),
+        Some("openrouter")
+    );
+    assert_eq!(
+        provider_runtime_key_for_identity(None, None, Some("OpenRouter")).as_deref(),
+        Some("openrouter")
+    );
+}
+
+#[test]
+fn provider_runtime_key_keeps_native_slot_and_credential_family() {
+    assert_eq!(
+        provider_runtime_key_for_identity(Some("openai-oauth"), None, Some("OpenAI")).as_deref(),
+        Some("openai")
+    );
+    assert_eq!(
+        provider_runtime_key_for_identity(Some("claude-api"), None, Some("Anthropic")).as_deref(),
+        Some("claude")
+    );
+}
+
+#[test]
+fn provider_runtime_key_maps_azure_aliases_to_openrouter_slot() {
+    for alias in ["azure", "azure-openai", "azure_openai", "Azure OpenAI"] {
+        assert_eq!(
+            provider_runtime_key_for_identity(Some(alias), None, None).as_deref(),
+            Some("openrouter"),
+            "alias {alias:?} must identify the shared OpenAI-compatible slot"
+        );
+    }
+}

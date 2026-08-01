@@ -2560,6 +2560,45 @@ default_model = "opaque/model@id"
 }
 
 #[test]
+fn fork_preserves_named_openai_compatible_profile_identity() {
+    let _lock = crate::storage::lock_test_env();
+    register_test_external_runtimes();
+    let temp = tempfile::TempDir::new().expect("create temp home");
+    let jcode_home = temp.path().join("jcode-home");
+    let _jcode_home = OrEnvVarGuard::set("JCODE_HOME", &jcode_home);
+    let _home = OrEnvVarGuard::set("HOME", temp.path());
+    let _appdata = OrEnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _env = isolate_openrouter_autodetect_env_or();
+    let _key = OrEnvVarGuard::set("TEST_NAMED_FORK_KEY", "test-key");
+
+    std::fs::create_dir_all(&jcode_home).expect("create test config dir");
+    std::fs::write(
+        jcode_home.join("config.toml"),
+        r#"
+[providers.quantmind-openai]
+type = "openai-compatible"
+base_url = "https://example.com/v1"
+api_key_env = "TEST_NAMED_FORK_KEY"
+default_model = "gpt-5.6-sol"
+model_catalog = false
+"#,
+    )
+    .expect("write test config");
+    crate::config::invalidate_config_cache();
+
+    let provider = MultiProvider::new_with_auth_status(crate::auth::AuthStatus::default());
+    provider
+        .set_model("quantmind-openai:gpt-5.6-sol")
+        .expect("select named profile");
+    assert_eq!(provider.display_name(), "quantmind-openai");
+    assert_eq!(provider.model(), "gpt-5.6-sol");
+
+    let fork = provider.fork();
+    assert_eq!(fork.display_name(), "quantmind-openai");
+    assert_eq!(fork.model(), "gpt-5.6-sol");
+}
+
+#[test]
 fn runtime_display_name_tracks_active_openai_compatible_profile() {
     // Regression for issue #329: switching to a direct OpenAI-compatible
     // profile (NVIDIA NIM) at runtime must surface that profile's display
@@ -2600,6 +2639,13 @@ fn runtime_display_name_tracks_active_openai_compatible_profile() {
         Provider::display_name(&provider),
         "NVIDIA NIM",
         "header/UI display name must reflect the active runtime profile"
+    );
+    let fork = provider.fork();
+    assert_eq!(fork.display_name(), "NVIDIA NIM");
+    assert_eq!(
+        fork.model(),
+        "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+        "fork must restore the catalog profile instead of falling back to the public OpenRouter slot"
     );
 
     // Switching back to the plain OpenRouter aggregator restores the label.

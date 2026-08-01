@@ -751,6 +751,7 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
     app.handle_server_event(
         crate::protocol::ServerEvent::AvailableModelsUpdated {
             provider_name: Some("Copilot".to_string()),
+            provider_runtime_key: None,
             provider_model: Some("claude-opus-4.6".to_string()),
             available_models: vec![
                 "claude-opus-4.6".to_string(),
@@ -816,6 +817,7 @@ fn test_duplicate_available_models_updated_event_is_a_no_op() {
         app.is_remote = true;
         let event = || crate::protocol::ServerEvent::AvailableModelsUpdated {
             provider_name: Some("Copilot".to_string()),
+            provider_runtime_key: None,
             provider_model: Some("claude-opus-4.6".to_string()),
             available_models: vec!["claude-opus-4.6".to_string()],
             available_model_routes: vec![crate::provider::ModelRoute {
@@ -879,6 +881,7 @@ fn test_remote_final_catalog_replaces_post_login_loading_state_in_place() {
     app.handle_server_event(
         crate::protocol::ServerEvent::AvailableModelsUpdated {
             provider_name: Some("Anthropic".to_string()),
+            provider_runtime_key: None,
             provider_model: Some("claude-opus-4.6".to_string()),
             available_models: vec!["claude-opus-4.6".to_string()],
             available_model_routes: vec![crate::provider::ModelRoute {
@@ -950,6 +953,7 @@ fn test_remote_model_switch_failure_shows_actionable_guidance() {
             id: 7,
             model: "claude-opus-4.6".to_string(),
             provider_name: Some("Copilot".to_string()),
+            provider_runtime_key: None,
             error: Some("credentials expired".to_string()),
         },
         &mut remote,
@@ -1061,6 +1065,7 @@ fn test_remote_model_switch_failure_restores_deferred_prompt() {
             id: 8,
             model: "Qwen/Qwen3-32B-TEE".to_string(),
             provider_name: Some("Chutes".to_string()),
+            provider_runtime_key: None,
             error: Some("model switch failed".to_string()),
         },
         &mut remote,
@@ -1122,6 +1127,7 @@ fn test_detailed_catalog_replaces_placeholder_routes_after_names_only_update() {
         app.handle_server_event(
             crate::protocol::ServerEvent::AvailableModelsUpdated {
                 provider_name: Some("Copilot".to_string()),
+                provider_runtime_key: None,
                 provider_model: Some("claude-opus-4.6".to_string()),
                 available_models: vec!["claude-opus-4.6".to_string()],
                 available_model_routes: Vec::new(),
@@ -1133,6 +1139,7 @@ fn test_detailed_catalog_replaces_placeholder_routes_after_names_only_update() {
         let detailed_redraw = app.handle_server_event(
             crate::protocol::ServerEvent::AvailableModelsUpdated {
                 provider_name: Some("Copilot".to_string()),
+                provider_runtime_key: None,
                 provider_model: Some("claude-opus-4.6".to_string()),
                 available_models: vec!["claude-opus-4.6".to_string()],
                 available_model_routes: vec![crate::provider::ModelRoute {

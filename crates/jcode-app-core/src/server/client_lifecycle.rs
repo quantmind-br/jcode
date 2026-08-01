@@ -3062,6 +3062,7 @@ fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> Option<String> {
 fn names_only_available_models_event(event: &ServerEvent) -> Option<ServerEvent> {
     let ServerEvent::AvailableModelsUpdated {
         provider_name,
+        provider_runtime_key,
         provider_model,
         available_models,
         ..
@@ -3071,6 +3072,7 @@ fn names_only_available_models_event(event: &ServerEvent) -> Option<ServerEvent>
     };
     Some(ServerEvent::AvailableModelsUpdated {
         provider_name: provider_name.clone(),
+        provider_runtime_key: provider_runtime_key.clone(),
         provider_model: provider_model.clone(),
         available_models: available_models.clone(),
         available_model_routes: Vec::new(),

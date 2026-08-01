@@ -52,6 +52,7 @@ fn finish_auth_refresh(session_id: &str, generation: u64) {
 fn available_models_snapshot_into_event(snapshot: ModelCatalogSnapshot) -> ServerEvent {
     ServerEvent::AvailableModelsUpdated {
         provider_name: snapshot.provider_name,
+        provider_runtime_key: snapshot.provider_runtime_key,
         provider_model: snapshot.provider_model,
         available_models: snapshot.available_models,
         available_model_routes: snapshot.model_routes,
@@ -381,12 +382,12 @@ fn model_switching_unavailable_current(agent: &Agent) -> Option<String> {
 
 fn send_model_changed_result(
     id: u64,
-    result: anyhow::Result<(String, String)>,
+    result: anyhow::Result<(String, String, String)>,
     fallback_model: String,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     match result {
-        Ok((updated, provider_name)) => {
+        Ok((updated, provider_name, provider_runtime_key)) => {
             crate::telemetry::record_model_switch();
             crate::logging::event_info(
                 "server_model_changed",
@@ -394,12 +395,14 @@ fn send_model_changed_result(
                     ("id", id.to_string()),
                     ("model", updated.clone()),
                     ("provider", provider_name.clone()),
+                    ("provider_runtime_key", provider_runtime_key.clone()),
                 ],
             );
             let _ = client_event_tx.send(ServerEvent::ModelChanged {
                 id,
                 model: updated,
                 provider_name: Some(provider_name),
+                provider_runtime_key: Some(provider_runtime_key),
                 error: None,
             });
         }
@@ -416,6 +419,7 @@ fn send_model_changed_result(
                 id,
                 model: fallback_model,
                 provider_name: None,
+                provider_runtime_key: None,
                 error: Some(error.to_string()),
             });
         }
@@ -434,6 +438,7 @@ fn apply_cycle_model(
             id,
             model: agent.provider_model(),
             provider_name: None,
+            provider_runtime_key: None,
             error: Some("Model switching is not available for this provider.".to_string()),
         });
         return;
@@ -463,7 +468,13 @@ fn apply_cycle_model(
         if result.is_ok() {
             agent.reset_provider_session();
         }
-        result.map(|_| (agent.provider_model(), agent.provider_name()))
+        result.map(|_| {
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.provider_runtime_key(),
+            )
+        })
     };
     send_model_changed_result(id, result, current, client_event_tx);
 }
@@ -571,6 +582,7 @@ fn apply_set_model(
             id,
             model: current,
             provider_name: None,
+            provider_runtime_key: None,
             error: Some("Model switching is not available for this provider.".to_string()),
         });
         return;
@@ -582,7 +594,13 @@ fn apply_set_model(
         if result.is_ok() {
             agent.reset_provider_session();
         }
-        result.map(|_| (agent.provider_model(), agent.provider_name()))
+        result.map(|_| {
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.provider_runtime_key(),
+            )
+        })
     };
     send_model_changed_result(id, result, current, client_event_tx);
 }
@@ -619,6 +637,7 @@ fn apply_set_route(
             id,
             model: current,
             provider_name: None,
+            provider_runtime_key: None,
             error: Some("Model switching is not available for this provider.".to_string()),
         });
         return;
@@ -630,7 +649,13 @@ fn apply_set_route(
         if result.is_ok() {
             agent.reset_provider_session();
         }
-        result.map(|_| (agent.provider_model(), agent.provider_name()))
+        result.map(|_| {
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.provider_runtime_key(),
+            )
+        })
     };
     send_model_changed_result(id, result, current, client_event_tx);
 }
@@ -1559,8 +1584,11 @@ mod tests {
                 id: 8,
                 model,
                 provider_name: Some(provider_name),
+                provider_runtime_key: Some(provider_runtime_key),
                 error: None,
-            }) if model == "test-model-b" && provider_name == "test-effort"
+            }) if model == "test-model-b"
+                && provider_name == "test-effort"
+                && provider_runtime_key == "test-effort"
         ));
     }
 

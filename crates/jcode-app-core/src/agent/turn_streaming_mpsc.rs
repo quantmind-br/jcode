@@ -1020,10 +1020,13 @@ impl Agent {
                     },
                 );
                 self.persist_session_best_effort("model fallback");
+                let provider_runtime_key =
+                    jcode_provider_core::canonical_provider_runtime_key(self.provider.name());
                 let _ = event_tx.send(ServerEvent::ModelChanged {
                     id: 0,
                     model: model_after_stream,
                     provider_name: Some(provider_name),
+                    provider_runtime_key,
                     error: None,
                 });
             }

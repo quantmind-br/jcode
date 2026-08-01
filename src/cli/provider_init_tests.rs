@@ -648,6 +648,9 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
         "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
         "JCODE_OPENROUTER_ALLOW_NO_AUTH",
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
@@ -659,6 +662,11 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
 
     crate::env::set_var("JCODE_HOME", dir.path());
     crate::subscription_catalog::apply_runtime_env();
+    crate::env::set_var("JCODE_OPENROUTER_API_BASE", "https://stale.example.test/v1");
+    crate::env::set_var("JCODE_OPENROUTER_API_KEY_NAME", "STALE_GATEWAY_API_KEY");
+    crate::env::set_var("JCODE_OPENROUTER_TRANSPORT_STATE", "direct-api-key");
+    crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
+    crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", "stale-gateway");
 
     let provider = init_provider_for_validation(&ProviderChoice::Ollama, Some("llama3.2"))
         .await
@@ -684,6 +692,9 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
             .as_deref(),
         Some("1")
     );
+    assert!(std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none());
+    assert!(std::env::var_os("JCODE_PROVIDER_PROFILE_NAME").is_none());
+    assert!(std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none());
     assert_eq!(
         std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT")
             .ok()
@@ -824,6 +835,7 @@ async fn provider_profile_init_uses_multiprovider_and_surfaces_sibling_routes() 
     let dir = TempDir::new().expect("temp dir");
     let saved: Vec<(String, Option<String>)> = [
         "JCODE_HOME",
+        "PRIMARY_GATEWAY_API_KEY",
         "JCODE_NON_INTERACTIVE",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
@@ -858,6 +870,7 @@ async fn provider_profile_init_uses_multiprovider_and_surfaces_sibling_routes() 
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
+        "PRIMARY_GATEWAY_API_KEY",
         "GITHUB_TOKEN",
         "GEMINI_API_KEY",
         "CURSOR_API_KEY",
@@ -880,6 +893,7 @@ async fn provider_profile_init_uses_multiprovider_and_surfaces_sibling_routes() 
     ] {
         crate::env::remove_var(key);
     }
+    crate::env::set_var("PRIMARY_GATEWAY_API_KEY", "test-primary-key");
     std::fs::write(
         dir.path().join("config.toml"),
         r#"
@@ -890,9 +904,10 @@ default_model = "shared-model"
 [providers.primary-gateway]
 type = "openai-compatible"
 base_url = "http://127.0.0.1:18080/v1"
-auth = "none"
+auth = "bearer"
+api_key_env = "PRIMARY_GATEWAY_API_KEY"
 default_model = "shared-model"
-requires_api_key = false
+requires_api_key = true
 
 [[providers.primary-gateway.models]]
 id = "shared-model"
@@ -927,6 +942,23 @@ id = "sibling-only"
     let provider = init_provider_for_validation(&ProviderChoice::OpenaiCompatible, None)
         .await
         .expect("provider-profile bootstrap should build MultiProvider catalog");
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_BASE").ok().as_deref(),
+        Some("http://127.0.0.1:18080/v1")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+            .ok()
+            .as_deref(),
+        Some("PRIMARY_GATEWAY_API_KEY")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_TRANSPORT_STATE")
+            .ok()
+            .as_deref(),
+        Some("direct-api-key")
+    );
+    assert_eq!(provider.display_name(), "primary-gateway");
 
     assert_eq!(
         provider.model(),

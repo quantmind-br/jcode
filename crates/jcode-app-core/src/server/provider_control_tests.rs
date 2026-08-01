@@ -330,12 +330,14 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
             }
             ServerEvent::AvailableModelsUpdated {
                 provider_name,
+                provider_runtime_key,
                 provider_model,
                 available_models,
                 available_model_routes,
             } => {
                 saw_models = Some((
                     provider_name,
+                    provider_runtime_key,
                     provider_model,
                     available_models,
                     available_model_routes,
@@ -347,9 +349,15 @@ async fn notify_auth_changed_emits_available_models_updated_after_provider_updat
     }
 
     assert!(saw_done, "expected immediate Done ack");
-    let (provider_name, provider_model, available_models, available_model_routes) =
-        saw_models.expect("expected AvailableModelsUpdated event");
+    let (
+        provider_name,
+        provider_runtime_key,
+        provider_model,
+        available_models,
+        available_model_routes,
+    ) = saw_models.expect("expected AvailableModelsUpdated event");
     assert_eq!(provider_name.as_deref(), Some("mock-auth"));
+    assert_eq!(provider_runtime_key.as_deref(), Some("mock-auth"));
     assert_eq!(provider_model.as_deref(), Some("logged-in-model"));
     assert_eq!(
         available_models,
@@ -1363,12 +1371,14 @@ async fn refresh_models_emits_available_models_updated_after_prefetch() {
             }
             ServerEvent::AvailableModelsUpdated {
                 provider_name,
+                provider_runtime_key,
                 provider_model,
                 available_models,
                 available_model_routes,
             } => {
                 saw_models = Some((
                     provider_name,
+                    provider_runtime_key,
                     provider_model,
                     available_models,
                     available_model_routes,
@@ -1380,9 +1390,15 @@ async fn refresh_models_emits_available_models_updated_after_prefetch() {
     }
 
     assert!(saw_done, "expected immediate Done ack");
-    let (provider_name, provider_model, available_models, available_model_routes) =
-        saw_models.expect("expected AvailableModelsUpdated event");
+    let (
+        provider_name,
+        provider_runtime_key,
+        provider_model,
+        available_models,
+        available_model_routes,
+    ) = saw_models.expect("expected AvailableModelsUpdated event");
     assert_eq!(provider_name.as_deref(), Some("mock-auth"));
+    assert_eq!(provider_runtime_key.as_deref(), Some("mock-auth"));
     assert_eq!(provider_model.as_deref(), Some("logged-out-model"));
     assert_eq!(available_models, vec!["logged-out-model".to_string()]);
     assert!(available_model_routes.iter().any(|route| {

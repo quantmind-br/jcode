@@ -1554,14 +1554,21 @@ async fn init_provider_with_options(
         | ProviderChoice::AlibabaCodingPlan
         | ProviderChoice::GeminiApi
         | ProviderChoice::OpenaiCompatible => {
-            disable_subscription_runtime_mode();
+            let preserve_active_named_profile = matches!(choice, ProviderChoice::OpenaiCompatible);
+            if preserve_active_named_profile {
+                disable_subscription_runtime_mode_preserving_active_provider_profile();
+            } else {
+                disable_subscription_runtime_mode();
+            }
             let profile = profile_for_choice(choice)
                 .ok_or_else(|| anyhow::anyhow!("missing provider profile for choice"))?;
-            if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none() {
-                // An explicit `--provider <compatible>` selection should win over
-                // any stale active-profile marker inherited from a previous
-                // bootstrap/login flow. Named provider profiles still take
-                // precedence when explicitly configured.
+            if !preserve_active_named_profile
+                || std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none()
+            {
+                // Explicit built-in compatible choices (Groq, Ollama, etc.)
+                // replace any inherited named profile. The generic
+                // OpenaiCompatible choice preserves a named profile supplied by
+                // --provider-profile; without one it applies the generic profile.
                 force_apply_openai_compatible_profile_env(Some(profile));
             }
             let mut runtime_model_hint = None;

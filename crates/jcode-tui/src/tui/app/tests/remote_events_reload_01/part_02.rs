@@ -161,10 +161,11 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
             app.queued_messages,
             vec![crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE]
         );
-        assert!(app.display_messages().iter().any(|msg| {
-            msg.content
-                .contains("confidence jumped suddenly")
-        }));
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| { msg.content.contains("confidence jumped suddenly") })
+        );
     });
 }
 
@@ -252,8 +253,7 @@ fn test_remote_poke_status_and_off_update_state() {
         rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
             .expect("/poke status should succeed remotely");
         assert!(app.display_messages().iter().any(|msg| {
-            msg.content
-                .contains("Auto-poke: ON. 1 incomplete todo.")
+            msg.content.contains("Auto-poke: ON. 1 incomplete todo.")
                 && msg.content.contains("A follow-up poke is queued.")
                 && msg.content.contains("A turn is currently running.")
         }));
@@ -326,6 +326,7 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
             }],
             images: vec![],
             provider_name: Some("mock".to_string()),
+            provider_runtime_key: None,
             provider_model: Some("mock-model".to_string()),
             subagent_model: None,
             autoreview_enabled: None,

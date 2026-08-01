@@ -38,6 +38,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
             messages: vec![],
             images: vec![],
             provider_name: Some("openai".to_string()),
+            provider_runtime_key: None,
             provider_model: Some("gpt-5.4".to_string()),
             subagent_model: None,
             autoreview_enabled: None,
@@ -115,6 +116,7 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
             }],
             images: vec![],
             provider_name: Some("claude".to_string()),
+            provider_runtime_key: None,
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
             autoreview_enabled: None,
@@ -383,4 +385,3 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
     assert_eq!(last.role, "system");
     assert!(last.content.contains("Will auto-retry in 3 seconds"));
 }
-

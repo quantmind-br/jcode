@@ -121,6 +121,11 @@ pub(crate) fn fill_missing_session_route_metadata_from_provider(
     session: &mut crate::session::Session,
     provider: &dyn crate::provider::Provider,
 ) {
+    // Remote/replay/test harness providers are placeholders, not route identity.
+    if matches!(provider.name(), "remote" | "replay" | "test-harness") {
+        return;
+    }
+
     if session.model.is_some()
         && session.provider_key.is_some()
         && session.model_identity_format.is_some()

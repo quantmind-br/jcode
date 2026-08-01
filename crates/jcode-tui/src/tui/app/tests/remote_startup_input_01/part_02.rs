@@ -6,6 +6,7 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.is_remote = true;
+    app.remote_provider_runtime_key = Some("claude".to_string());
     app.remote_available_entries = vec!["old-model".to_string()];
     app.remote_model_options = vec![crate::provider::ModelRoute {
         model: "old-model".to_string(),
@@ -19,6 +20,7 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
     let needs_redraw = app.handle_server_event(
         crate::protocol::ServerEvent::AvailableModelsUpdated {
             provider_name: Some("OpenAI".to_string()),
+            provider_runtime_key: Some("openai".to_string()),
             provider_model: Some("new-model".to_string()),
             available_models: vec!["new-model".to_string(), "second-model".to_string()],
             available_model_routes: vec![crate::provider::ModelRoute {
@@ -44,6 +46,32 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
     assert!(app.remote_model_options[0].available);
     assert_eq!(app.remote_provider_name.as_deref(), Some("OpenAI"));
     assert_eq!(app.remote_provider_model.as_deref(), Some("new-model"));
+    assert_eq!(app.remote_provider_runtime_key.as_deref(), Some("openai"));
+}
+
+#[test]
+fn test_legacy_catalog_runtime_key_uses_live_label_over_stale_session_metadata() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.session.provider_key = Some("claude".to_string());
+    app.session.route_api_method = Some("claude-api".to_string());
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::AvailableModelsUpdated {
+            provider_name: Some("OpenAI".to_string()),
+            provider_runtime_key: None,
+            provider_model: Some("gpt-5.5".to_string()),
+            available_models: vec!["gpt-5.5".to_string()],
+            available_model_routes: Vec::new(),
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.remote_provider_runtime_key.as_deref(), Some("openai"));
 }
 
 #[test]
@@ -120,6 +148,7 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.is_remote = true;
+    app.remote_provider_runtime_key = Some("openrouter".to_string());
     app.pending_remote_model_refresh_snapshot = Some((
         vec!["old-model".to_string()],
         vec![crate::provider::ModelRoute {
@@ -135,6 +164,7 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
     let needs_redraw = app.handle_server_event(
         crate::protocol::ServerEvent::AvailableModelsUpdated {
             provider_name: None,
+            provider_runtime_key: None,
             provider_model: None,
             available_models: vec!["old-model".to_string(), "new-model".to_string()],
             available_model_routes: vec![
@@ -173,6 +203,11 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
     );
     assert_eq!(app.remote_model_options.len(), 2);
     assert!(app.pending_remote_model_refresh_snapshot.is_none());
+    assert_eq!(
+        app.remote_provider_runtime_key.as_deref(),
+        Some("openrouter"),
+        "legacy catalog updates must not erase an explicit runtime key"
+    );
 
     let last = app.display_messages.last().expect("display message");
     assert_eq!(last.role, "system");
@@ -294,12 +329,14 @@ fn test_remote_auth_model_change_does_not_add_a_third_visible_line() {
             id: 91,
             model: "gpt-5.6-sol".to_string(),
             provider_name: Some("OpenAI".to_string()),
+            provider_runtime_key: Some("openai".to_string()),
             error: None,
         },
         &mut remote,
     );
 
     assert_eq!(app.remote_provider_model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(app.remote_provider_runtime_key.as_deref(), Some("openai"));
     assert!(app.display_messages.is_empty());
 }
 

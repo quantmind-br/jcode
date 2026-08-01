@@ -1070,6 +1070,10 @@ pub enum ServerEvent {
         /// Provider name (e.g. "anthropic", "openai")
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_name: Option<String>,
+        /// Machine-facing provider transport slot (`openrouter`, `openai`, ...).
+        /// Distinct from the display label and route/profile identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_runtime_key: Option<String>,
         /// Model name (e.g. "claude-sonnet-4-20250514")
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_model: Option<String>,
@@ -1208,6 +1212,8 @@ pub enum ServerEvent {
         model: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_runtime_key: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -1256,6 +1262,8 @@ pub enum ServerEvent {
     AvailableModelsUpdated {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_runtime_key: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_model: Option<String>,
         available_models: Vec<String>,

@@ -169,6 +169,7 @@ pub(super) async fn handle_get_model_catalog(
     let build_started = Instant::now();
     let (
         provider_name,
+        provider_runtime_key,
         provider_model,
         available_models,
         available_model_routes,
@@ -178,6 +179,7 @@ pub(super) async fn handle_get_model_catalog(
         match agent.try_lock() {
             Ok(agent_guard) => (
                 Some(agent_guard.provider_name()),
+                Some(agent_guard.provider_runtime_key()),
                 Some(agent_guard.provider_model()),
                 agent_guard.available_models_display(),
                 agent_guard.model_routes(),
@@ -193,8 +195,18 @@ pub(super) async fn handle_get_model_catalog(
                     .or_else(|_| Session::load_startup_stub(session_id))
                     .ok();
                 let persisted_model = persisted.as_ref().and_then(|session| session.model.clone());
+                let persisted_provider_runtime_key = persisted.as_ref().and_then(|session| {
+                    crate::provider_catalog::provider_runtime_key_for_identity(
+                        session.provider_key.as_deref(),
+                        session.route_api_method.as_deref(),
+                        None,
+                    )
+                });
                 (
                     Some(provider.display_name()),
+                    persisted_provider_runtime_key.or_else(|| {
+                        jcode_provider_core::canonical_provider_runtime_key(provider.name())
+                    }),
                     persisted_model.or_else(|| Some(provider.model())),
                     provider.available_models_display(),
                     provider.model_routes(),
@@ -213,6 +225,7 @@ pub(super) async fn handle_get_model_catalog(
         messages: Vec::new(),
         images: Vec::new(),
         provider_name,
+        provider_runtime_key,
         provider_model,
         available_models,
         available_model_routes,
@@ -472,6 +485,12 @@ async fn send_history_from_persisted_session(
     let provider_name =
         history_provider_name_from_session(&session).or_else(|| Some(provider.display_name()));
     let provider_model = session.model.clone().or_else(|| Some(provider.model()));
+    let provider_runtime_key = crate::provider_catalog::provider_runtime_key_for_identity(
+        session.provider_key.as_deref(),
+        session.route_api_method.as_deref(),
+        provider_name.as_deref(),
+    )
+    .or_else(|| jcode_provider_core::canonical_provider_runtime_key(provider.name()));
     let subagent_model = session.subagent_model.clone();
     let autoreview_enabled = session.autoreview_enabled;
     let autojudge_enabled = session.autojudge_enabled;
@@ -502,6 +521,7 @@ async fn send_history_from_persisted_session(
         messages,
         images,
         provider_name,
+        provider_runtime_key,
         provider_model,
         subagent_model,
         autoreview_enabled,
@@ -560,6 +580,7 @@ pub(super) async fn send_history(
         images,
         is_canary,
         provider_name,
+        provider_runtime_key,
         provider_model,
         subagent_model,
         autoreview_enabled,
@@ -635,6 +656,7 @@ pub(super) async fn send_history(
             images,
             agent_guard.is_canary(),
             agent_guard.provider_name(),
+            agent_guard.provider_runtime_key(),
             agent_guard.provider_model(),
             agent_guard.subagent_model(),
             agent_guard.autoreview_enabled(),
@@ -715,6 +737,7 @@ pub(super) async fn send_history(
         messages,
         images,
         provider_name: Some(provider_name),
+        provider_runtime_key: Some(provider_runtime_key),
         provider_model: Some(provider_model),
         subagent_model,
         autoreview_enabled,

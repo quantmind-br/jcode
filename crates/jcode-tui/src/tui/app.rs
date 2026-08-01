@@ -294,6 +294,7 @@ struct ModelPickerCacheSignature {
     simplified_model_picker: bool,
     catalog_revision: u64,
     remote_provider_name: Option<String>,
+    remote_provider_runtime_key: Option<String>,
     remote_available_len: usize,
     remote_available_first: Option<String>,
     remote_available_last: Option<String>,
@@ -1127,6 +1128,9 @@ pub struct App {
     // Remote provider info (set when running in remote mode)
     remote_client_instance_id: String,
     remote_provider_name: Option<String>,
+    /// Machine-facing provider transport slot reported by the server.
+    /// Never render this; remote display surfaces use `remote_provider_name`.
+    remote_provider_runtime_key: Option<String>,
     remote_provider_model: Option<String>,
     /// Monotonic counter bumped each time the server pushes a fresh remote model
     /// catalog snapshot (`AvailableModelsUpdated`). The onboarding readiness
@@ -2406,9 +2410,7 @@ impl App {
 
     fn kv_cache_provider_name(&self) -> String {
         if self.uses_server_or_replay_metadata() {
-            self.remote_provider_name
-                .clone()
-                .unwrap_or_else(|| self.provider.name().to_string())
+            self.provider_runtime_key()
         } else {
             self.provider.name().to_string()
         }

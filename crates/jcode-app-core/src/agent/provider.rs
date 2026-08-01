@@ -40,6 +40,7 @@ impl Agent {
             self.available_models_display(),
             self.model_routes(),
         )
+        .with_provider_runtime_key(Some(self.provider_runtime_key()))
     }
 
     pub fn registry(&self) -> Registry {

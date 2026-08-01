@@ -329,6 +329,105 @@ pub fn provider_label_for_session_key(provider_key: &str) -> Option<String> {
     Some(label)
 }
 
+/// Resolve the machine-facing provider transport slot from persisted or wire
+/// identity metadata.
+///
+/// Precedence is route API method, then canonical session provider key, then a
+/// legacy display label. OpenAI-compatible routes and named profiles all run
+/// through the `openrouter` slot; their profile id remains separate in
+/// `session.provider_key` / `route_api_method`.
+pub fn provider_runtime_key_for_identity(
+    provider_key: Option<&str>,
+    route_api_method: Option<&str>,
+    provider_label: Option<&str>,
+) -> Option<String> {
+    if let Some(api_method) = route_api_method
+        .map(str::trim)
+        .filter(|api_method| !api_method.is_empty())
+    {
+        use jcode_provider_core::ModelRouteApiMethod;
+        let runtime_key = match ModelRouteApiMethod::parse(api_method) {
+            ModelRouteApiMethod::JcodeSubscription => Some("jcode"),
+            ModelRouteApiMethod::OpenRouter | ModelRouteApiMethod::OpenAiCompatible { .. } => {
+                Some("openrouter")
+            }
+            ModelRouteApiMethod::ClaudeOAuth | ModelRouteApiMethod::AnthropicApiKey => {
+                Some("claude")
+            }
+            ModelRouteApiMethod::OpenAIOAuth | ModelRouteApiMethod::OpenAIApiKey => Some("openai"),
+            ModelRouteApiMethod::Copilot => Some("copilot"),
+            ModelRouteApiMethod::Cursor => Some("cursor"),
+            ModelRouteApiMethod::Bedrock => Some("bedrock"),
+            ModelRouteApiMethod::CodeAssistOAuth => Some("gemini"),
+            ModelRouteApiMethod::AntigravityHttps => Some("antigravity"),
+            ModelRouteApiMethod::RemoteCatalog
+            | ModelRouteApiMethod::Current
+            | ModelRouteApiMethod::Other(_) => None,
+        };
+        if let Some(runtime_key) = runtime_key {
+            return Some(runtime_key.to_string());
+        }
+    }
+
+    provider_key
+        .and_then(provider_runtime_key_from_known_identity)
+        .or_else(|| provider_label.and_then(provider_runtime_key_from_known_identity))
+        .or_else(|| {
+            provider_key
+                .or(provider_label)
+                .map(str::trim)
+                .filter(|identity| !identity.is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn provider_runtime_key_from_known_identity(identity: &str) -> Option<String> {
+    let identity = identity.trim();
+    if identity.is_empty() {
+        return None;
+    }
+
+    if let Some(route) = jcode_provider_core::AuthRoute::parse(identity) {
+        return Some(jcode_provider_core::provider_key(route.active_provider()).to_string());
+    }
+    if let Some(provider) = jcode_provider_core::parse_provider_hint(identity) {
+        return Some(jcode_provider_core::provider_key(provider).to_string());
+    }
+
+    let normalized = identity.to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "jcode" | "jcode-subscription" | "jcode subscription" | "subscription"
+    ) {
+        return Some("jcode".to_string());
+    }
+    if matches!(
+        normalized.as_str(),
+        "openai-compatible"
+            | "openai compatible"
+            | "azure"
+            | "azure-openai"
+            | "azure_openai"
+            | "azure openai"
+    ) || normalized.split_once(':').is_some_and(|(prefix, profile)| {
+        prefix == "openai-compatible" && !profile.trim().is_empty()
+    }) || openai_compatible_profile_by_id(&normalized).is_some()
+        || openai_compatible_profile_id_for_display_name(identity).is_some()
+        || crate::config::config()
+            .providers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case(identity))
+    {
+        return Some("openrouter".to_string());
+    }
+
+    match normalized.as_str() {
+        "github copilot" => Some("copilot".to_string()),
+        "aws bedrock" => Some("bedrock".to_string()),
+        _ => None,
+    }
+}
+
 pub fn openai_compatible_profile_by_id(id: &str) -> Option<OpenAiCompatibleProfile> {
     let normalized = id.trim().to_ascii_lowercase();
     openai_compatible_profiles()

@@ -524,22 +524,51 @@ impl App {
             self.remote_available_entries.clone(),
             self.remote_model_options.clone(),
         )
+        .with_provider_runtime_key(self.remote_provider_runtime_key.clone())
     }
 
     pub(super) fn replace_remote_model_catalog_snapshot(
         &mut self,
         snapshot: jcode_provider_core::ModelCatalogSnapshot,
     ) -> CatalogReplaceOutcome {
+        let jcode_provider_core::ModelCatalogSnapshot {
+            provider_name,
+            provider_runtime_key,
+            provider_model,
+            available_models,
+            model_routes,
+        } = snapshot;
+        let incoming_runtime_key = provider_runtime_key.or_else(|| {
+            if self.remote_provider_runtime_key.is_some() {
+                None
+            } else {
+                provider_name.as_deref().and_then(|provider_name| {
+                    crate::provider_catalog::provider_runtime_key_for_identity(
+                        None,
+                        None,
+                        Some(provider_name),
+                    )
+                })
+            }
+        });
         let mut provider_meta_changed = false;
         let mut provider_name_changed = false;
-        if let Some(name) = snapshot.provider_name
+        let mut provider_runtime_key_changed = false;
+        if let Some(name) = provider_name
             && self.remote_provider_name.as_deref() != Some(name.as_str())
         {
             self.remote_provider_name = Some(name);
             provider_meta_changed = true;
             provider_name_changed = true;
         }
-        if let Some(model) = snapshot.provider_model
+        if let Some(runtime_key) = incoming_runtime_key
+            && self.remote_provider_runtime_key.as_deref() != Some(runtime_key.as_str())
+        {
+            self.remote_provider_runtime_key = Some(runtime_key);
+            provider_meta_changed = true;
+            provider_runtime_key_changed = true;
+        }
+        if let Some(model) = provider_model
             && self.remote_provider_model.as_deref() != Some(model.as_str())
         {
             self.update_context_limit_for_model(&model);
@@ -549,27 +578,27 @@ impl App {
         // A names-only snapshot (models without route expansion) arrives when the
         // server downgrades an oversized AvailableModelsUpdated frame. Keep the
         // previously known detailed routes in that case; the picker synthesizes
-        // fallback routes for any newly appearing models. If the provider
+        // fallback routes for any newly appearing models. If either provider
         // identity changed, the old routes are stale and must be dropped.
-        let names_only = snapshot.model_routes.is_empty() && !snapshot.available_models.is_empty();
-        let replace_routes = !names_only || provider_name_changed;
+        let names_only = model_routes.is_empty() && !available_models.is_empty();
+        let replace_routes = !names_only || provider_name_changed || provider_runtime_key_changed;
         // Shared-server bus chatter rebroadcasts the catalog frequently (every
         // session's refresh fans out to every connected client). When nothing
         // actually changed, skip the invalidation entirely: invalidating here
         // forces a picker-cache rebuild, an ~100KB cache rewrite to disk, and a
         // full-frame redraw on every idle client, which starves the input line.
         let catalog_changed = provider_meta_changed
-            || self.remote_available_entries != snapshot.available_models
-            || (replace_routes && self.remote_model_options != snapshot.model_routes);
+            || self.remote_available_entries != available_models
+            || (replace_routes && self.remote_model_options != model_routes);
         if !catalog_changed {
             return CatalogReplaceOutcome {
                 provider_meta_changed,
                 catalog_changed,
             };
         }
-        self.remote_available_entries = snapshot.available_models;
+        self.remote_available_entries = available_models;
         if replace_routes {
-            self.remote_model_options = snapshot.model_routes;
+            self.remote_model_options = model_routes;
         }
         self.invalidate_model_picker_cache();
         CatalogReplaceOutcome {
@@ -768,20 +797,36 @@ impl App {
         &mut self,
         snapshot: jcode_provider_core::ModelCatalogSnapshot,
     ) -> bool {
-        if !snapshot.has_routes() {
+        let jcode_provider_core::ModelCatalogSnapshot {
+            provider_name,
+            provider_runtime_key,
+            provider_model,
+            available_models,
+            model_routes,
+        } = snapshot;
+        if model_routes.is_empty() {
             return false;
         }
 
+        if self.remote_provider_runtime_key.is_none() {
+            self.remote_provider_runtime_key = provider_runtime_key.or_else(|| {
+                crate::provider_catalog::provider_runtime_key_for_identity(
+                    self.session.provider_key.as_deref(),
+                    self.session.route_api_method.as_deref(),
+                    provider_name.as_deref(),
+                )
+            });
+        }
         if self.remote_provider_name.is_none() {
-            self.remote_provider_name = snapshot.provider_name;
+            self.remote_provider_name = provider_name;
         }
         if self.remote_provider_model.is_none() {
-            self.remote_provider_model = snapshot.provider_model;
+            self.remote_provider_model = provider_model;
         }
         if self.remote_available_entries.is_empty() {
-            self.remote_available_entries = snapshot.available_models;
+            self.remote_available_entries = available_models;
         }
-        self.remote_model_options = snapshot.model_routes;
+        self.remote_model_options = model_routes;
         self.invalidate_model_picker_cache();
         true
     }
@@ -900,6 +945,7 @@ impl App {
             simplified_model_picker: crate::perf::tui_policy().simplified_model_picker,
             catalog_revision: self.model_picker_catalog_revision,
             remote_provider_name: self.remote_provider_name.clone(),
+            remote_provider_runtime_key: self.remote_provider_runtime_key.clone(),
             remote_available_len: self.remote_available_entries.len(),
             remote_available_first: self.remote_available_entries.first().cloned(),
             remote_available_last: self.remote_available_entries.last().cloned(),

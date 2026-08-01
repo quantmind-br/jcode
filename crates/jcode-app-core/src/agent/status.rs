@@ -157,6 +157,11 @@ impl Agent {
         self.provider.display_name()
     }
 
+    pub fn provider_runtime_key(&self) -> String {
+        jcode_provider_core::canonical_provider_runtime_key(self.provider.name())
+            .unwrap_or_else(|| self.provider.name().to_string())
+    }
+
     pub fn provider_model(&self) -> String {
         self.provider.model().to_string()
     }

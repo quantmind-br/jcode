@@ -34,6 +34,7 @@ fn catalog_dedup_key_ignores_age_drift_but_keeps_real_changes() {
     };
     let event = |detail: &str| ServerEvent::AvailableModelsUpdated {
         provider_name: Some("OpenRouter".to_string()),
+        provider_runtime_key: None,
         provider_model: Some("claude-opus-4.6".to_string()),
         available_models: vec!["claude-opus-4.6".to_string()],
         available_model_routes: vec![route(detail)],

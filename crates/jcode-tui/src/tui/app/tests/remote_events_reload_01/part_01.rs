@@ -140,14 +140,20 @@ fn test_handle_server_event_session_renamed_updates_remote_title() {
 }
 
 #[test]
-fn test_handle_server_event_history_clears_connection_type_on_session_change_when_missing() {
+fn test_handle_server_event_history_session_change_applies_runtime_identity() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
     app.remote_session_id = Some("session_old".to_string());
     app.connection_type = Some("websocket".to_string());
+    app.remote_provider_name = Some("Anthropic".to_string());
+    app.remote_provider_runtime_key = Some("claude".to_string());
+    app.remote_provider_model = Some("claude-sonnet-4-20250514".to_string());
+    app.remote_available_entries = vec!["claude-sonnet-4-20250514".to_string()];
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
@@ -155,8 +161,9 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
             session_id: "session_new".to_string(),
             messages: vec![],
             images: vec![],
-            provider_name: Some("claude".to_string()),
-            provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            provider_name: Some("quantmind-openai".to_string()),
+            provider_runtime_key: Some("openrouter".to_string()),
+            provider_model: Some("gpt-5.5".to_string()),
             subagent_model: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -178,7 +185,7 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
             connection_type: None,
             status_detail: None,
             upstream_provider: None,
-            resolved_credential: None,
+            resolved_credential: Some(jcode_provider_core::ResolvedCredential::ApiKey),
             reasoning_effort: None,
             service_tier: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
@@ -190,6 +197,40 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
 
     assert_eq!(app.remote_session_id.as_deref(), Some("session_new"));
     assert_eq!(app.connection_type, None);
+    assert_eq!(
+        app.remote_provider_name.as_deref(),
+        Some("quantmind-openai")
+    );
+    assert_eq!(
+        app.remote_provider_runtime_key.as_deref(),
+        Some("openrouter")
+    );
+    assert_eq!(app.remote_provider_model.as_deref(), Some("gpt-5.5"));
+    assert!(app.remote_available_entries.is_empty());
+    assert_eq!(
+        crate::tui::TuiState::provider_display_name(&app),
+        "quantmind-openai"
+    );
+    assert_eq!(
+        crate::tui::TuiState::provider_runtime_key(&app),
+        "openrouter"
+    );
+    let info = crate::tui::TuiState::info_widget_data(&app);
+    assert_eq!(info.provider_name.as_deref(), Some("quantmind-openai"));
+    assert_eq!(
+        info.usage_info.and_then(|usage| usage.source_label),
+        Some("quantmind-openai".to_string())
+    );
+    let header = crate::tui::ui::build_persistent_header(&app, 100)
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(header.contains("quantmind-openai"), "header: {header}");
+    assert!(
+        !header.to_ascii_lowercase().contains("openrouter"),
+        "header: {header}"
+    );
 }
 
 #[test]
@@ -201,6 +242,9 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
 
     app.remote_session_id = Some("session_same".to_string());
     app.connection_type = Some("websocket".to_string());
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_provider_runtime_key = Some("openrouter".to_string());
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
@@ -209,6 +253,7 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
             messages: vec![],
             images: vec![],
             provider_name: Some("claude".to_string()),
+            provider_runtime_key: None,
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
             autoreview_enabled: None,
@@ -243,6 +288,14 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
 
     assert_eq!(app.remote_session_id.as_deref(), Some("session_same"));
     assert_eq!(app.connection_type.as_deref(), Some("websocket"));
+    assert_eq!(
+        app.remote_provider_runtime_key.as_deref(),
+        Some("openrouter")
+    );
+    assert_eq!(
+        crate::tui::TuiState::provider_runtime_key(&app),
+        "openrouter"
+    );
 }
 
 #[test]
@@ -290,6 +343,7 @@ fn test_handle_server_event_history_session_change_clears_streaming_preview_diag
             messages: vec![],
             images: vec![],
             provider_name: Some("claude".to_string()),
+            provider_runtime_key: None,
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
             autoreview_enabled: None,
@@ -372,12 +426,11 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
     );
     // The client-side /rewind path arms a pending notice before the server's
     // History redelivery arrives (remote/key_handling.rs).
-    app.pending_remote_rewind_notice =
-        Some(crate::tui::app::PendingRemoteRewindNotice {
-            undo: false,
-            message_index: Some(1),
-            changed_messages: 2,
-        });
+    app.pending_remote_rewind_notice = Some(crate::tui::app::PendingRemoteRewindNotice {
+        undo: false,
+        message_index: Some(1),
+        changed_messages: 2,
+    });
 
     // Truncated payload after the rewind: same session id, fewer messages.
     app.handle_server_event(
@@ -392,6 +445,7 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
             }],
             images: vec![],
             provider_name: Some("claude".to_string()),
+            provider_runtime_key: None,
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
             autoreview_enabled: None,
@@ -449,7 +503,8 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
 }
 
 #[test]
-fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_and_keeps_preview() {
+fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_and_keeps_preview()
+{
     // Multi-client rewind fan-out pin (server side has NO fan-out: a /rewind
     // History redelivery is written only to the rewinding connection's socket,
     // per-client event channel, server/client_lifecycle.rs:521 and
@@ -500,6 +555,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
             }],
             images: vec![],
             provider_name: Some("claude".to_string()),
+            provider_runtime_key: None,
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
             autoreview_enabled: None,
@@ -540,9 +596,9 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
         "unsolicited same-session History must not replace a bootstrapped mid-stream transcript"
     );
     assert!(
-        !app.display_messages()
-            .iter()
-            .any(|m| m.content.contains("truncated payload from another client's rewind")),
+        !app.display_messages().iter().any(|m| m
+            .content
+            .contains("truncated payload from another client's rewind")),
         "unsolicited same-session History payload should be dropped, not applied"
     );
     // Live stream state preserved: preview and streaming text survive.
@@ -581,6 +637,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
                 }],
                 images: vec![],
                 provider_name: Some("claude".to_string()),
+                provider_runtime_key: None,
                 provider_model: Some("claude-sonnet-4-20250514".to_string()),
                 subagent_model: None,
                 autoreview_enabled: None,
@@ -682,6 +739,7 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
             }],
             images: vec![],
             provider_name: Some("claude".to_string()),
+            provider_runtime_key: None,
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
             autoreview_enabled: None,
@@ -731,15 +789,11 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
 
     // The stale Done from the rewound-away turn arrives AFTER the truncated
     // History (mpsc forwarder ordering).
-    app.handle_server_event(
-        crate::protocol::ServerEvent::Done { id: 7 },
-        &mut remote,
-    );
+    app.handle_server_event(crate::protocol::ServerEvent::Done { id: 7 }, &mut remote);
 
     assert!(!app.is_processing, "late Done should settle the turn");
     assert!(
-        !app
-            .display_messages()
+        !app.display_messages()
             .iter()
             .any(|m| m.content.contains("rewound-away assistant text")),
         "late Done must not resurrect assistant text that the rewind removed"
@@ -771,6 +825,7 @@ fn test_handle_server_event_history_session_change_clears_pending_interleaves() 
             messages: vec![],
             images: vec![],
             provider_name: Some("claude".to_string()),
+            provider_runtime_key: None,
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
             autoreview_enabled: None,
@@ -1213,8 +1268,10 @@ fn test_handle_server_event_message_end_marks_stream_as_finalizing_without_stall
     app.status = ProcessingStatus::Streaming;
     app.streaming.streaming_tps_collect_output = true;
 
-    let needs_redraw =
-        app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    let needs_redraw = app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
 
     assert!(needs_redraw);
     assert!(app.stream_message_ended);
@@ -1237,14 +1294,19 @@ fn test_remote_done_waits_for_paced_backlog_and_one_live_frame() {
     app.apply_stream_ops(ops);
     assert!(!app.stream_buffer.is_empty());
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
     app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
 
     assert!(app.is_processing, "Done must not force-flush the backlog");
     assert_eq!(app.deferred_stream_done_id, Some(42));
-    assert!(app.display_messages.iter().all(|message| {
-        message.role != "assistant" || !message.content.contains(response)
-    }));
+    assert!(
+        app.display_messages
+            .iter()
+            .all(|message| { message.role != "assistant" || !message.content.contains(response) })
+    );
 
     // The first tick drains the short backlog, but deliberately leaves the live
     // streaming representation visible for one frame before committing it.
@@ -1260,9 +1322,11 @@ fn test_remote_done_waits_for_paced_backlog_and_one_live_frame() {
     rt.block_on(crate::tui::app::remote::handle_tick(&mut app, &mut remote));
     assert!(!app.is_processing);
     assert_eq!(app.deferred_stream_done_id, None);
-    assert!(app.display_messages.iter().any(|message| {
-        message.role == "assistant" && message.content == response
-    }));
+    assert!(
+        app.display_messages
+            .iter()
+            .any(|message| { message.role == "assistant" && message.content == response })
+    );
 }
 
 #[test]
@@ -1367,7 +1431,10 @@ fn test_handle_server_event_tps_message_end_counts_late_usage_without_timer_runn
     );
     app.streaming.streaming_tps_start = Some(Instant::now() - Duration::from_secs(4));
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
 
     assert!(app.streaming.streaming_tps_collect_output);
     assert!(app.streaming.streaming_tps_start.is_none());
@@ -1413,7 +1480,10 @@ fn test_handle_server_event_tps_redundant_late_usage_after_message_end_does_not_
         },
         &mut remote,
     );
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
             input: 100,
@@ -1454,7 +1524,9 @@ fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
         id: "tool_1".to_string(),
         name: "bash".to_string(),
         input: serde_json::Value::Null,
-        intent: None, thought_signature: None, });
+        intent: None,
+        thought_signature: None,
+    });
     app.interleave_message = Some("queued interrupt".to_string());
     app.pending_soft_interrupts
         .push("pending soft interrupt".to_string());
@@ -1885,6 +1957,7 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
             messages: vec![],
             images: vec![],
             provider_name: Some("claude".to_string()),
+            provider_runtime_key: None,
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
             autoreview_enabled: None,

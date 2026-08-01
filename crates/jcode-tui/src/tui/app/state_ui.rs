@@ -1957,9 +1957,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         let (provider_name, model_name, reasoning_effort, service_tier, transport, total_tokens) =
             if app.is_remote {
                 (
-                    app.remote_provider_name
-                        .clone()
-                        .unwrap_or_else(|| app.provider.name().to_string()),
+                    app.provider_display_name(),
                     app.remote_provider_model
                         .clone()
                         .unwrap_or_else(|| app.provider.model()),
@@ -1970,7 +1968,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                 )
             } else {
                 (
-                    app.provider.name().to_string(),
+                    app.provider_display_name(),
                     app.provider.model(),
                     app.provider.reasoning_effort(),
                     app.provider.service_tier(),

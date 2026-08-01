@@ -177,24 +177,39 @@ impl App {
     }
 
     fn remote_header_provider_name(&self) -> Option<String> {
-        let configured_provider_hint = self.configured_remote_provider_hint();
         self.remote_provider_name
             .clone()
+            .or_else(|| self.session_provider_key_label())
+            .or_else(|| self.configured_remote_provider_hint())
             .or_else(|| {
                 self.effective_remote_provider_model().and_then(|model| {
-                    crate::provider::provider_for_model_with_hint(&model, None)
-                        .or(configured_provider_hint.as_deref())
-                        .map(str::to_string)
+                    crate::provider::provider_for_model_with_hint(&model, None).map(str::to_string)
                 })
             })
             .filter(|provider| !provider.trim().is_empty())
     }
 
+    fn derived_remote_provider_runtime_key(&self) -> Option<String> {
+        self.remote_provider_runtime_key.clone().or_else(|| {
+            crate::provider_catalog::provider_runtime_key_for_identity(
+                self.session.provider_key.as_deref(),
+                self.session.route_api_method.as_deref(),
+                self.remote_header_provider_name().as_deref(),
+            )
+        })
+    }
+
     /// See `TuiState::provider_runtime_key`.
+    #[expect(
+        clippy::manual_unwrap_or_default,
+        reason = "the explicit None branch documents the empty remote identity contract without ratcheting swallowed defaults"
+    )]
     pub(crate) fn provider_runtime_key(&self) -> String {
-        if self.is_remote {
-            self.remote_header_provider_name()
-                .unwrap_or_else(|| self.provider.name().to_string())
+        if self.uses_server_or_replay_metadata() {
+            match self.derived_remote_provider_runtime_key() {
+                Some(runtime_key) => runtime_key,
+                None => String::new(),
+            }
         } else {
             self.provider.name().to_string()
         }
@@ -216,7 +231,7 @@ impl App {
         // persisted session key does not follow.
         let live = self.provider.display_name();
         if live.trim().is_empty() {
-            self.session_provider_key_label().unwrap_or_default()
+            self.session_provider_key_label().unwrap_or(live)
         } else {
             live
         }
@@ -231,13 +246,11 @@ impl App {
 
     fn widget_route_info(&self, model: Option<&str>) -> WidgetRouteInfo {
         let uses_remote_widget_metadata = self.is_remote || self.is_replay_runtime();
-        let remote_provider_name = if uses_remote_widget_metadata {
-            self.remote_header_provider_name()
-        } else {
-            None
-        };
+        let remote_provider_runtime_key = uses_remote_widget_metadata
+            .then(|| self.derived_remote_provider_runtime_key())
+            .flatten();
         let provider_name = if uses_remote_widget_metadata {
-            remote_provider_name.as_deref()
+            remote_provider_runtime_key.as_deref()
         } else {
             Some(self.provider.name())
         };

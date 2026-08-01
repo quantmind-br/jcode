@@ -1209,6 +1209,35 @@ impl ModelRoute {
     }
 }
 
+/// Canonical machine-facing key for the provider transport slot.
+///
+/// `Provider::name()` is the source, but composite providers historically
+/// expose built-in names with display capitalization (`OpenRouter`, `OpenAI`,
+/// ...). Normalize only that built-in vocabulary; unknown provider-owned keys
+/// remain opaque. This is deliberately not [`RuntimeKey::stable_id`]: a direct
+/// `openai-compatible:<profile>` route still executes through the
+/// `openrouter` provider slot.
+pub fn canonical_provider_runtime_key(provider_name: &str) -> Option<String> {
+    let provider_name = provider_name.trim();
+    if provider_name.is_empty() {
+        return None;
+    }
+    let normalized = provider_name.to_ascii_lowercase();
+    let known_alias = match normalized.as_str() {
+        "jcode" | "jcode-subscription" | "jcode subscription" => Some("jcode"),
+        "github copilot" => Some("copilot"),
+        "aws bedrock" => Some("bedrock"),
+        _ => None,
+    };
+    if let Some(runtime_key) = known_alias {
+        return Some(runtime_key.to_string());
+    }
+    if let Some(provider) = parse_provider_hint(provider_name) {
+        return Some(provider_key(provider).to_string());
+    }
+    Some(provider_name.to_string())
+}
+
 /// Canonical snapshot of a provider's model catalog at a point in time.
 ///
 /// This is the local contract shared by server-side providers, remote clients,
@@ -1219,6 +1248,10 @@ impl ModelRoute {
 pub struct ModelCatalogSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_name: Option<String>,
+    /// Machine-facing provider transport slot (`openrouter`, `openai`, ...).
+    /// This stays distinct from both the display label and a route stable id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_runtime_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_model: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1236,10 +1269,16 @@ impl ModelCatalogSnapshot {
     ) -> Self {
         Self {
             provider_name,
+            provider_runtime_key: None,
             provider_model,
             available_models,
             model_routes,
         }
+    }
+
+    pub fn with_provider_runtime_key(mut self, provider_runtime_key: Option<String>) -> Self {
+        self.provider_runtime_key = provider_runtime_key;
+        self
     }
 
     pub fn from_provider(provider: &dyn Provider) -> Self {
@@ -1252,6 +1291,7 @@ impl ModelCatalogSnapshot {
             provider.available_models_display(),
             provider.model_routes(),
         )
+        .with_provider_runtime_key(canonical_provider_runtime_key(provider.name()))
     }
 
     pub fn has_routes(&self) -> bool {
@@ -1687,9 +1727,34 @@ mod tests {
 
         assert_eq!(snapshot.provider_name.as_deref(), Some("snapshot-provider"));
         assert_eq!(snapshot.provider_model.as_deref(), Some("snapshot-model"));
+        assert_eq!(
+            snapshot.provider_runtime_key.as_deref(),
+            Some("snapshot-provider")
+        );
         assert_eq!(snapshot.available_models, ["snapshot-model"]);
         assert!(snapshot.has_routes());
         assert_eq!(snapshot.model_routes[0].api_method, "snapshot-api");
+    }
+
+    #[test]
+    fn canonical_provider_runtime_key_normalizes_builtin_slots_only() {
+        assert_eq!(
+            canonical_provider_runtime_key("OpenRouter").as_deref(),
+            Some("openrouter")
+        );
+        assert_eq!(
+            canonical_provider_runtime_key("OpenAI").as_deref(),
+            Some("openai")
+        );
+        assert_eq!(
+            canonical_provider_runtime_key("Jcode Subscription").as_deref(),
+            Some("jcode")
+        );
+        assert_eq!(
+            canonical_provider_runtime_key("profile-owned-key").as_deref(),
+            Some("profile-owned-key")
+        );
+        assert_eq!(canonical_provider_runtime_key("  "), None);
     }
 
     #[test]

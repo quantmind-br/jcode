@@ -391,6 +391,17 @@ fn history_images_match_retained(
         })
 }
 
+fn clear_remote_provider_identity_for_session_change(app: &mut App) {
+    app.remote_provider_name = None;
+    app.remote_provider_runtime_key = None;
+    app.remote_provider_model = None;
+    app.remote_available_entries.clear();
+    app.remote_model_options.clear();
+    app.pending_remote_model_refresh_snapshot = None;
+    app.remote_resolved_credential = None;
+    app.invalidate_model_picker_cache();
+}
+
 #[cfg(test)]
 mod history_dedup_tests {
     use super::{
@@ -1499,6 +1510,7 @@ pub(in crate::tui::app) fn handle_server_event(
             images,
             session_id,
             provider_name,
+            provider_runtime_key,
             provider_model,
             subagent_model,
             autoreview_enabled,
@@ -1611,6 +1623,7 @@ pub(in crate::tui::app) fn handle_server_event(
             let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
 
             if session_changed {
+                clear_remote_provider_identity_for_session_change(app);
                 app.rate_limit_pending_message = None;
                 app.rate_limit_reset = None;
                 app.connection_type = None;
@@ -1672,7 +1685,8 @@ pub(in crate::tui::app) fn handle_server_event(
                 provider_model,
                 available_models,
                 available_model_routes,
-            );
+            )
+            .with_provider_runtime_key(provider_runtime_key);
             let catalog_outcome = app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
             app.clear_remote_startup_phase();
             app.session.subagent_model = subagent_model;
@@ -2218,6 +2232,7 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::ModelChanged {
             model,
             provider_name,
+            provider_runtime_key,
             error,
             ..
         } => {
@@ -2245,8 +2260,18 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.update_context_limit_for_model(&model);
                 app.remote_provider_model = Some(model.clone());
                 app.clear_remote_startup_phase();
+                let provider_runtime_key = provider_runtime_key.or_else(|| {
+                    crate::provider_catalog::provider_runtime_key_for_identity(
+                        None,
+                        None,
+                        provider_name.as_deref(),
+                    )
+                });
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
+                }
+                if let Some(runtime_key) = provider_runtime_key {
+                    app.remote_provider_runtime_key = Some(runtime_key);
                 }
                 app.invalidate_model_picker_cache();
                 crate::tui::app::model_context::model_route_metadata::apply_remote_model_switch_metadata(
@@ -2266,6 +2291,7 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         ServerEvent::AvailableModelsUpdated {
             provider_name,
+            provider_runtime_key,
             provider_model,
             available_models,
             available_model_routes,
@@ -2275,7 +2301,8 @@ pub(in crate::tui::app) fn handle_server_event(
                 provider_model,
                 available_models,
                 available_model_routes,
-            );
+            )
+            .with_provider_runtime_key(provider_runtime_key);
             let mut explicit_refresh_summary_shown = false;
             if let Some((before_models, before_routes)) =
                 app.pending_remote_model_refresh_snapshot.take()

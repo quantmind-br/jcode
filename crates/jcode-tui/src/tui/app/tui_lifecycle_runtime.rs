@@ -31,8 +31,7 @@ impl App {
             model_name
         };
         app.remote_provider_model = Some(effective_model.clone());
-        // Infer provider name from model string
-        let provider_name = match crate::provider::provider_for_model(&effective_model) {
+        let inferred_provider_name = match crate::provider::provider_for_model(&effective_model) {
             Some("claude") => "anthropic",
             Some("openai") => "openai",
             Some("openrouter") => "openrouter",
@@ -43,7 +42,19 @@ impl App {
             Some(other) => other,
             None => "claude",
         };
-        app.remote_provider_name = Some(provider_name.to_string());
+        let provider_name = app
+            .session
+            .provider_key
+            .as_deref()
+            .and_then(crate::provider_catalog::provider_label_for_session_key)
+            .unwrap_or_else(|| inferred_provider_name.to_string());
+        app.remote_provider_runtime_key =
+            crate::provider_catalog::provider_runtime_key_for_identity(
+                app.session.provider_key.as_deref(),
+                app.session.route_api_method.as_deref(),
+                Some(&provider_name),
+            );
+        app.remote_provider_name = Some(provider_name);
 
         app.suppress_terminal_title_updates = !set_title;
         if set_title && !session_name.is_empty() {
