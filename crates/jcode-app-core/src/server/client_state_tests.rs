@@ -214,6 +214,114 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
 #[tokio::test]
 #[expect(
     clippy::await_holding_lock,
+    reason = "test intentionally keeps the agent busy lock held to force persisted picker metadata through History"
+)]
+async fn persisted_picker_profile_metadata_renders_profile_label_in_history() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let selection =
+        jcode_provider_core::RouteSelection::from_model_route(&jcode_provider_core::ModelRoute {
+            model: "nvidia/llama-3.1-nemotron-ultra-253b-v1".to_string(),
+            provider: "NVIDIA NIM".to_string(),
+            api_method: "openai-compatible:nvidia-nim".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        });
+    let metadata =
+        crate::provider::MultiProvider::session_route_metadata_from_selection(&selection);
+    let session_id = "session_picker_profile_history";
+    let mut session = crate::session::Session::create_with_id(
+        session_id.to_string(),
+        None,
+        Some("picker profile history".to_string()),
+    );
+    session.model = Some(metadata.model);
+    session.provider_key = metadata.provider_key;
+    session.route_api_method = metadata.route_api_method;
+    session.model_identity_format = Some(metadata.model_identity_format);
+    session.save().expect("persist picker route metadata");
+
+    let persisted = crate::session::Session::load(session_id).expect("reload picker session");
+    assert_eq!(
+        persisted.provider_key.as_deref(),
+        Some("openai-compatible:nvidia-nim")
+    );
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        persisted,
+        None,
+    )));
+    let busy_guard = agent.lock().await;
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.to_string(),
+        Arc::clone(&agent),
+    )])));
+    let client_connections = Arc::new(RwLock::new(HashMap::<String, ClientConnectionInfo>::new()));
+    let client_count = Arc::new(RwLock::new(1usize));
+    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (_reader_a, writer_a) = stream_a.into_split();
+    let writer = Arc::new(Mutex::new(writer_a));
+
+    handle_get_history(
+        43,
+        session_id,
+        true,
+        &agent,
+        &provider,
+        &sessions,
+        &client_connections,
+        &client_count,
+        &writer,
+        "server-name",
+        "🔥",
+        None,
+    )
+    .await
+    .expect("write persisted picker History");
+
+    drop(busy_guard);
+    drop(writer);
+    let mut bytes = Vec::new();
+    stream_b
+        .read_to_end(&mut bytes)
+        .await
+        .expect("read History event bytes");
+    let event: crate::protocol::ServerEvent = serde_json::from_slice(
+        bytes
+            .split(|byte| *byte == b'\n')
+            .next()
+            .unwrap_or_default(),
+    )
+    .expect("decode History event");
+    match event {
+        crate::protocol::ServerEvent::History {
+            provider_name,
+            provider_runtime_key,
+            ..
+        } => {
+            assert_eq!(provider_name.as_deref(), Some("NVIDIA NIM"));
+            assert_eq!(provider_runtime_key.as_deref(), Some("openrouter"));
+        }
+        other => panic!("expected History event, got {other:?}"),
+    }
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
     reason = "test intentionally keeps the agent busy lock held to exercise model-catalog fallback"
 )]
 async fn handle_get_model_catalog_does_not_wait_for_busy_agent_lock() {

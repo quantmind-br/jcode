@@ -307,29 +307,58 @@ pub fn runtime_provider_display_name(provider_name: &str) -> String {
 /// Returns `None` only for an empty key, so callers can fall back to a live
 /// provider label.
 pub fn provider_label_for_session_key(provider_key: &str) -> Option<String> {
+    use jcode_provider_core::{ModelRouteApiMethod, provider_label};
+
     let key = provider_key.trim();
     if key.is_empty() {
         return None;
     }
-    if let Some(route) = jcode_provider_core::AuthRoute::parse(key) {
-        return Some(jcode_provider_core::provider_label(route.active_provider()).to_string());
-    }
-    let label = match key.to_ascii_lowercase().as_str() {
-        "openai" => "OpenAI".to_string(),
-        "claude" | "anthropic" => "Anthropic".to_string(),
-        "openrouter" => "OpenRouter".to_string(),
-        "copilot" => "GitHub Copilot".to_string(),
-        "cursor" => "Cursor".to_string(),
-        "gemini" => "Gemini".to_string(),
-        "bedrock" => "Bedrock".to_string(),
-        "antigravity" => "Antigravity".to_string(),
-        "jcode" => "Jcode".to_string(),
-        other => match openai_compatible_profile_by_id(other) {
-            Some(profile) => profile.display_name.to_string(),
-            None => key.to_string(),
+
+    let label = match ModelRouteApiMethod::parse(key) {
+        ModelRouteApiMethod::JcodeSubscription => "Jcode Subscription".to_string(),
+        ModelRouteApiMethod::ClaudeOAuth | ModelRouteApiMethod::AnthropicApiKey => {
+            provider_label(jcode_provider_core::ActiveProvider::Claude).to_string()
+        }
+        ModelRouteApiMethod::OpenAIOAuth | ModelRouteApiMethod::OpenAIApiKey => {
+            provider_label(jcode_provider_core::ActiveProvider::OpenAI).to_string()
+        }
+        ModelRouteApiMethod::OpenRouter => "OpenRouter".to_string(),
+        ModelRouteApiMethod::OpenAiCompatible {
+            profile_id: Some(profile_id),
+        } => provider_label_for_compatible_profile_id(&profile_id),
+        ModelRouteApiMethod::OpenAiCompatible { profile_id: None } => {
+            "OpenAI-compatible".to_string()
+        }
+        ModelRouteApiMethod::Copilot => "GitHub Copilot".to_string(),
+        ModelRouteApiMethod::Cursor => "Cursor".to_string(),
+        ModelRouteApiMethod::Bedrock => "Bedrock".to_string(),
+        ModelRouteApiMethod::CodeAssistOAuth => "Gemini".to_string(),
+        ModelRouteApiMethod::AntigravityHttps => "Antigravity".to_string(),
+        ModelRouteApiMethod::RemoteCatalog
+        | ModelRouteApiMethod::Current
+        | ModelRouteApiMethod::Other(_) => match key.to_ascii_lowercase().as_str() {
+            "openai" => "OpenAI".to_string(),
+            "claude" | "anthropic" => "Anthropic".to_string(),
+            "gemini" => "Gemini".to_string(),
+            "antigravity" => "Antigravity".to_string(),
+            "jcode" => "Jcode".to_string(),
+            _ => provider_label_for_compatible_profile_id(key),
         },
     };
     Some(label)
+}
+
+fn provider_label_for_compatible_profile_id(profile_id: &str) -> String {
+    let profile_id = profile_id.trim();
+    if let Some(profile) = openai_compatible_profile_by_id(profile_id) {
+        return profile.display_name.to_string();
+    }
+    crate::config::config()
+        .providers
+        .keys()
+        .find(|name| name.eq_ignore_ascii_case(profile_id))
+        .cloned()
+        .unwrap_or_else(|| profile_id.to_string())
 }
 
 /// Resolve the machine-facing provider transport slot from persisted or wire

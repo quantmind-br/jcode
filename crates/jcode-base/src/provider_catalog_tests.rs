@@ -1272,13 +1272,9 @@ fn minimax_default_provider_applies_openai_api_key_env_not_openrouter() {
 fn provider_label_for_session_key_is_none_for_empty_key() {
     assert_eq!(provider_label_for_session_key(""), None);
     assert_eq!(provider_label_for_session_key("   "), None);
-}
-
-#[test]
-fn provider_label_for_session_key_preserves_unknown_runtime_profile() {
     assert_eq!(
-        provider_label_for_session_key("quantmind-openai").as_deref(),
-        Some("quantmind-openai")
+        provider_label_for_session_key("MyGateway").as_deref(),
+        Some("MyGateway")
     );
 }
 
